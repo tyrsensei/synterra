@@ -46,6 +46,7 @@ func add_player(player_id: int, peer_player_info: Dictionary) -> void:
 	var players_container:= get_tree().current_scene.get_node("Players") as Node3D
 	var player:= player_scene.instantiate()
 	player.name = str("Player-", player_id)
+	player.set_multiplayer_authority(player_id)
 	players_container.add_child(player)
 
 func remove_multiplayer_peer():

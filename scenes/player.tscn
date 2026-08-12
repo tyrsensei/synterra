@@ -1,5 +1,7 @@
 [gd_scene format=3 uid="uid://clri3gya7ulwm"]
 
+[ext_resource type="Script" uid="uid://ufnl57d3apcs" path="res://scenes/player.gd" id="1_3vyb7"]
+
 [sub_resource type="CapsuleMesh" id="CapsuleMesh_u8vuu"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_4nir5"]
@@ -13,6 +15,7 @@ properties/1/spawn = true
 properties/1/replication_mode = 1
 
 [node name="Player" type="CharacterBody3D" unique_id=233120086]
+script = ExtResource("1_3vyb7")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=2132401851]
 mesh = SubResource("CapsuleMesh_u8vuu")
