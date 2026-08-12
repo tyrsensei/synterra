@@ -14,22 +14,20 @@
 **Synchronisation de position (en cours)**
 - `scenes/player.tscn` : `CharacterBody3D` (racine "Player") + `CollisionShape3D` + `MeshInstance3D` (capsules) + `MultiplayerSynchronizer` configuré sur `Player:position` et `Player:rotation` (Point d'apparition + Toujours cochés)
 - `levels/game.tscn` : `Game` > `PlayersSpawner` (`MultiplayerSpawner`, Spawn Path → `Players`) + `Players` (Node3D vide, frère du spawner, Auto Spawn List contient `player.tscn`)
-- `network_manager.gd` (autoload) : fonction `add_player(player_id, peer_player_info)` unifiée, appelée depuis `create_server()` (id=1, après succès) et depuis `update_player_info()` côté serveur (après validation mot de passe) ; stocke `players[player_id]` et instancie `player.tscn` sous `get_tree().current_scene.get_node("Players")`, nom du nœud `"Player-" + str(player_id)`
+- `network_manager.gd` (autoload) : fonction `add_player(player_id, peer_player_info)` unifiée, appelée depuis `create_server()` (id=1, après succès) et depuis `update_player_info()` côté serveur (après validation mot de passe) ; stocke `players[player_id]` et instancie `player.tscn` sous `get_tree().current_scene.get_node("Players")` (casté en `Node3D`), nom du nœud `"Player-" + str(player_id)`
 
-## Piège identifié (pas encore corrigé)
+## Piège identifié — corrigé ✅
 
-`change_scene_to_file()` est différé (idle time) → il faut `await get_tree().scene_changed` :
-- côté serveur, dans `create_server()`, après `add_player()` réussi
-- côté client, dans `update_players()`, avant de considérer la scène prête (le client change de scène mais **ne doit pas** appeler `add_player()` lui-même — c'est le `MultiplayerSpawner` qui réplique automatiquement)
+`change_scene_to_file()` est différé (idle time) → nécessitait `await get_tree().scene_changed`. Vérifié dans `network_manager.gd` :
+- côté serveur, dans `create_server()` (lignes 28-29), avant `add_player()`
+- côté client, dans `update_players()` (lignes 89-90), qui change de scène sans appeler `add_player()` lui-même — c'est bien le `MultiplayerSpawner` qui réplique automatiquement
 
 ## Prochaines étapes
 
-1. Ajouter les `await get_tree().scene_changed` (serveur + client, cf. piège ci-dessus)
-2. Corriger le typage `Node3D` vs `Node` sur `players_container` (`get_node()` retourne `Node`)
-3. Écrire le script de déplacement sur `player.tscn` avec `set_multiplayer_authority()`
+1. Écrire le script de déplacement sur `player.tscn` avec `set_multiplayer_authority()`
    - Choix : autorité client, **sans** validation serveur pour l'instant (contexte combat tour par tour + hébergement joueurs type LAN → peu de risque de triche compétitive)
    - Validation serveur notée comme amélioration future
-4. Tester en réel à deux instances
+2. Tester en réel à deux instances
 
 ## Décisions d'architecture (rappel)
 
