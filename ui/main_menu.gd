@@ -12,4 +12,5 @@ func _on_host_button_button_up() -> void:
 
 
 func _on_join_button_button_up() -> void:
+	await SceneManager.change_scene()
 	NetworkManager.join_server(nickname.text, password.text)

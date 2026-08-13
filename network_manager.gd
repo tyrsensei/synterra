@@ -89,4 +89,3 @@ func update_player_info(peer_player_info: Dictionary, password: String):
 func update_players(new_players: Dictionary):
 	print_debug("update_players: ", new_players)
 	players = new_players
-	server_ready.emit()
