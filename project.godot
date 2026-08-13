@@ -11,12 +11,14 @@ config_version=5
 [application]
 
 config/name="Synterra"
+run/main_scene="uid://b25l4pmgige41"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [autoload]
 
 NetworkManager="*uid://brpymu8uys1j2"
+SceneManager="*uid://cjriqgchrcrxa"
 
 [display]
 

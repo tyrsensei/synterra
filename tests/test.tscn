@@ -1,0 +1,37 @@
+[gd_scene format=3 uid="uid://coj1va5as4oaf"]
+
+[ext_resource type="Script" uid="uid://d1ngefdwyfxf4" path="res://tests/test.gd" id="1_yggfj"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_4nir5"]
+
+[sub_resource type="ConcavePolygonShape3D" id="ConcavePolygonShape3D_yggfj"]
+data = PackedVector3Array(1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0, -1, 1, 0, -1)
+
+[sub_resource type="Environment" id="Environment_4nir5"]
+
+[sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_n6f5g"]
+
+[node name="Test" type="Node3D" unique_id=627619286]
+script = ExtResource("1_yggfj")
+
+[node name="Players" type="Node3D" parent="." unique_id=1344076041]
+
+[node name="StaticBody3D" type="StaticBody3D" parent="." unique_id=590152428]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticBody3D" unique_id=18315818]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0)
+mesh = SubResource("PlaneMesh_4nir5")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D" unique_id=273890114]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0)
+shape = SubResource("ConcavePolygonShape3D_yggfj")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=427327825]
+environment = SubResource("Environment_4nir5")
+camera_attributes = SubResource("CameraAttributesPractical_n6f5g")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1842444298]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2035153, 5.337969)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=727044004]
+transform = Transform3D(1, 0, 0, 0, 0.48781052, 0.87294954, 0, -0.87294954, 0.48781052, 0, 3.5593963, 0)

@@ -8,6 +8,8 @@ var player_info = {"name": "Name"}
 
 var player_scene: PackedScene = preload("res://scenes/player.tscn")
 
+signal server_ready
+
 func _ready() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -25,8 +27,9 @@ func create_server(nickname: String, password: String):
 	multiplayer.multiplayer_peer = peer
 	print_debug("host: ", peer)
 	player_info["name"] = nickname
-	get_tree().change_scene_to_file("res://levels/game.tscn")
-	await get_tree().scene_changed
+	server_ready.emit()
+
+func on_scene_loaded_on_server() -> void:
 	add_player(1, player_info)
 
 func join_server(nickname: String, password: String, address: String = "127.0.0.1", port: int = 7000):
@@ -46,7 +49,6 @@ func add_player(player_id: int, peer_player_info: Dictionary) -> void:
 	var players_container:= get_tree().current_scene.get_node("Players") as Node3D
 	var player:= player_scene.instantiate()
 	player.name = str("Player-", player_id)
-	player.set_multiplayer_authority(player_id)
 	players_container.add_child(player)
 
 func remove_multiplayer_peer():
@@ -87,5 +89,4 @@ func update_player_info(peer_player_info: Dictionary, password: String):
 func update_players(new_players: Dictionary):
 	print_debug("update_players: ", new_players)
 	players = new_players
-	get_tree().change_scene_to_file("res://levels/game.tscn")
-	await get_tree().scene_changed
+	server_ready.emit()
