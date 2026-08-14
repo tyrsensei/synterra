@@ -30,8 +30,5 @@ shape = SubResource("ConcavePolygonShape3D_yggfj")
 environment = SubResource("Environment_4nir5")
 camera_attributes = SubResource("CameraAttributesPractical_n6f5g")
 
-[node name="Camera3D" type="Camera3D" parent="." unique_id=1842444298]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2035153, 5.337969)
-
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=727044004]
 transform = Transform3D(1, 0, 0, 0, 0.48781052, 0.87294954, 0, -0.87294954, 0.48781052, 0, 3.5593963, 0)
