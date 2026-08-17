@@ -118,6 +118,47 @@ Points clés retenus :
 - `SpringArm3D.collision_mask` : layer 1 uniquement → le shapecast de la caméra ignore totalement les autres joueurs (peu importe leur layer), ne réagit qu'au décor. Corrige le clipping/masquage d'écran quand un autre joueur passe devant la caméra.
 - Retenu : le sol n'a pas besoin de connaître la layer des joueurs — c'est le `collision_mask` du `CharacterBody3D` lui-même qui pilote la détection sol dans `move_and_slide()`.
 
+**Rotation caméra/perso pilotée par la souris : implémentée ✅ (validée en local, pas encore en réseau réel)**
+
+Choix de gameplay tranché cette session : caméra et perso **couplés** (comme un TPS classique type WoW/ARPG) — tourner la caméra tourne aussi le perso, qui "regarde" toujours dans sa direction de vue. Le strafe gauche/droite est un vrai pas latéral, pas une rotation. C'est le `CharacterBody3D` lui-même qui tourne (pas de nœud pivot caméra séparé), et le `SpringArm3D`/`Camera3D` suivent automatiquement en tant qu'enfants.
+
+Pattern retenu — **capture évènementielle, consommation physique** :
+```gdscript
+# Dans _input(event) :
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		mouse_move += event.relative
+```
+```gdscript
+# Dans _physics_process(delta) :
+rotate_y(-mouse_move.x * camera_speed)
+mouse_move = Vector2.ZERO
+```
+- `_input()` **accumule** (`+=`, jamais un remplacement) le `relative` de chaque `InputEventMouseMotion` reçu, filtré via `if event is InputEventMouseMotion` (idiomatique : pas de cast explicite nécessaire, Godot infère le type dans le bloc). Nécessaire car Godot peut appeler `_input()` plusieurs fois par tick physique — un remplacement perdrait les deltas intermédiaires.
+- `_physics_process()` **consomme puis reset à zéro** l'accumulateur à chaque tick. Sûr sans mécanisme de verrouillage particulier : Godot est single-threaded sur sa boucle de jeu, `_input()` et `_physics_process()` ne s'exécutent jamais en parallèle.
+- `rotate_y()` préféré à une assignation directe sur `rotation.y` : rotation *relative* (cohérente avec un accumulateur de delta, pas une position absolue), et robuste à l'ordre d'application des angles d'Euler si d'autres axes de rotation s'ajoutent plus tard (tangage caméra prévu, voir "Prochaines étapes").
+- `camera_speed` déclaré en `@export var` (valeur par défaut `0.005`, réglée empiriquement, ajustable depuis l'inspecteur sans recompiler) et axe X inversé (`-mouse_move.x`) pour un ressenti plus naturel — choix de confort, pas de contrainte technique.
+- `Input.mouse_mode = Input.MOUSE_MODE_CAPTURED` posé dans `_ready()`, **conditionné par `is_multiplayer_authority()`** (même bloc que `camera_3d.make_current()`) — piège identifié et évité : posé initialement dans `_enter_tree()`, ce qui aurait capturé la souris à chaque instanciation de `player.tscn`, y compris pour les instances des *autres* joueurs répliquées localement. `_ready()` choisi pour la même raison que pour la caméra (ordre d'exécution enfants → parent, cohérence avec `camera_3d` déjà résolu).
+
+**Conséquence sur le mouvement horizontal — passage d'un repère global à un repère local (piège découvert et corrigé) :**
+
+Le code de mouvement existant (`velocity.x = direction_input.x`, `velocity.z = -direction_input.y`) assignait `velocity` en repère **global** — sans conséquence tant que le perso ne tournait jamais. Avec la rotation ajoutée, ce code cassait : la touche "avant" avançait toujours vers -Z du *monde*, jamais vers -Z du *perso*.
+
+Correction — conversion via les vecteurs de base (`basis`) du `CharacterBody3D`, qui donnent les axes locaux actuels exprimés en coordonnées globales :
+```gdscript
+var move_direction: Vector3 = (
+	direction_input.x * self.transform.basis.x
+) + (
+	-direction_input.y * self.transform.basis.z
+)
+self.velocity.x = move_direction.x
+self.velocity.z = move_direction.z
+```
+- `basis.x` = direction "droite" actuelle du perso (utilisé pour le strafe)
+- `basis.z` = direction "arrière" actuelle du perso en repère global (convention -Z-local-avant déjà établie), d'où le `-` pour obtenir un vecteur "avant" exploitable
+- Un seul `Vector3` (`move_direction`) construit par combinaison scalaire + somme vectorielle, puis décomposé en `.x`/`.z` à l'assignation finale — évite de dupliquer le calcul pour chaque axe séparément
+- Piège intermédiaire rencontré en cours de route : confusion entre `basis.y` (axe vertical, haut/bas) et `basis.z` (axe avant/arrière) — à garder en tête, l'intuition du nom d'axe ne suffit pas toujours, se fier à la convention -Z-avant déjà documentée
+
 **Bug corrigé en cours de route (mapping input) :** l'ordre des arguments de `Input.get_vector()` compte : le 1er couple pilote `.x` du vecteur retourné, le 2e pilote `.y`. Appel final retenu :
 ```gdscript
 var direction_input := Input.get_vector("ui_left", "ui_right", "ui_down", "ui_up") * speed
@@ -129,8 +170,8 @@ Rappel convention Godot 3D : **-Z local = "avant"** d'un `Node3D` (visible dans 
 
 ## Prochaines étapes
 
-1. **Mouvement de caméra piloté par le joueur** : la caméra suit le joueur mais est fixe en orientation pour l'instant (`SpringArm3D` orienté en dur). Prochaine itération naturelle — rotation caméra (souris ou stick droit), probablement dans `player.gd` aux côtés des autres inputs (choix déjà discuté et assumé). À cadrer dans une session dédiée.
-2. **Non testé en réseau réel (2 instances) avec la caméra** : la config caméra + collision layers a été validée en local (un seul poste) mais pas encore confirmée en test réseau croisé — vérifier que chaque client voit bien sa propre caméra active (`make_current()` déclenché par la bonne autorité), jamais celle d'un pair.
+1. **Non testé en réseau réel (2 instances) avec la rotation caméra/perso** : la rotation souris (voir section dédiée ci-dessous) a été validée en local (un seul poste) mais pas encore confirmée en test réseau croisé — vérifier que chaque client capture bien sa propre souris et tourne sa propre caméra (conditionné par `is_multiplayer_authority()`), sans affecter les instances des autres joueurs répliquées localement.
+2. **Tangage caméra (mouvement vertical souris) — non implémenté** : `mouse_move.y` est déjà accumulé mais volontairement inutilisé pour l'instant. Décision prise en session : le mouvement vertical de la souris doit piloter une rotation indépendante du `SpringArm3D` seul (tangage caméra), *sans* affecter la rotation du `CharacterBody3D` qui doit rester à plat. À implémenter dans une session dédiée à l'affinage caméra.
 3. **Gestion d'erreur de connexion (identifiée, non implémentée)** : prévoir un signal (ex. `connection_rejected`) émis par `NetworkManager` en cas de mot de passe incorrect ou de `connection_failed`, pour permettre un retour au menu principal. Actuellement, un client dont la connexion échoue reste bloqué sur `game.tscn` sans réseau. Jugé non urgent pour un premier prototype (repoussé une session).
 4. **Nettoyage mineur** : vérifier qu'il n'y a plus de risque de double `change_scene()` entre `SceneManager.join_server()` et `SceneManager._on_server_ready()` côté client (a priori réglé par le retrait de `server_ready.emit()` dans `update_players()`, à documenter/confirmer explicitement).
 5. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — pas de pendant "client" pour tester ce rôle en isolation. Pas bloquant, le vrai chemin de prod (menu) sert de test client actuellement.
