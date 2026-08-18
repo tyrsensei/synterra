@@ -70,7 +70,6 @@ func _on_connected_ok():
 
 func _on_connected_fail():
 	remove_multiplayer_peer()
-	players.clear()
 	connection_error.emit("Connection failed")
 
 

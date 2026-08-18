@@ -4,6 +4,7 @@ var scene_to_load: PackedScene
 var skip_scene_loading: bool = false
 
 signal error(reason: String)
+signal loaded_complete
 
 func _ready() -> void:
 	NetworkManager.server_ready.connect(_on_server_ready)
@@ -14,6 +15,7 @@ func _on_server_ready() -> void:
 		await change_scene()
 	if multiplayer.is_server():
 		NetworkManager.on_scene_loaded_on_server()
+	loaded_complete.emit()
 
 func _on_connection_error(reason: String):
 	print_debug("SceneManager:_on_connection_error: ", reason)

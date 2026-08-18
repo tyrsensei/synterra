@@ -1,5 +1,7 @@
 [gd_scene format=3 uid="uid://tmet2lgan4rd"]
 
+[ext_resource type="Script" uid="uid://br6sdltjvvryr" path="res://levels/game_ui.gd" id="1_m637p"]
+
 [sub_resource type="PlaneMesh" id="PlaneMesh_fgcmb"]
 
 [sub_resource type="ConcavePolygonShape3D" id="ConcavePolygonShape3D_m637p"]
@@ -36,3 +38,17 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2035153, 5.337969)
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1469574538]
 transform = Transform3D(1, 0, 0, 0, 0.48781052, 0.87294954, 0, -0.87294954, 0.48781052, 0, 3.5593963, 0)
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=6171677]
+script = ExtResource("1_m637p")
+
+[node name="Loading" type="Label" parent="UI" unique_id=739703045]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 48
+text = "Loading..."
+horizontal_alignment = 1
+vertical_alignment = 1
