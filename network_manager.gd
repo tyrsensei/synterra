@@ -53,6 +53,11 @@ func add_player(player_id: int, peer_player_info: Dictionary) -> void:
 	player.name = str("Player-", player_id)
 	players_container.add_child(player)
 
+func remove_player(player_id: int) -> void:
+	players.erase(player_id)
+	var players_container:= get_tree().current_scene.get_node("Players") as Node3D
+	players_container.find_child(str("Player-", player_id), false, false).queue_free()
+
 func remove_multiplayer_peer():
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
 	players.clear()
@@ -62,7 +67,7 @@ func _on_peer_connected(id: int):
 	
 func _on_peer_disconnected(id: int):
 	print_debug("peer disconnected: ", id)
-	players.erase(id)
+	remove_player(id)
 
 func _on_connected_ok():
 	print_debug("on_connected_ok: ", player_info, " (", server_password, ")")
