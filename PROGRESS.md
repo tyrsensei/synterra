@@ -168,14 +168,45 @@ self.velocity.z = -direction_input.y  # -Z = avant en Godot 3D, d'où le signe n
 ```
 Rappel convention Godot 3D : **-Z local = "avant"** d'un `Node3D` (visible dans l'éditeur via le frustum de la `Camera3D` ou le gizmo d'axes, bleu = Z).
 
+**Tangage caméra (rotation verticale souris) : implémenté ✅ (validé en réseau réel, 2 instances)**
+
+Point ouvert de la session précédente clos en premier : la rotation horizontale (caméra/perso couplés) a été testée en réseau croisé — seule l'instance ayant le focus voit sa caméra bouger, confirmant que `is_multiplayer_authority()` filtre correctement l'input souris entre pairs répliqués.
+
+Architecture retenue pour le tangage, après discussion des alternatives :
+- **Nouveau nœud `CameraPivot`** (`Node3D`) inséré entre `CharacterBody3D` et `SpringArm3D` : `CharacterBody3D` (rotation Y) → `CameraPivot` (rotation X dynamique, nouveau) → `SpringArm3D` (offset fixe "Trails in the Sky", inchangé) → `Camera3D`.
+- Raison du nœud séparé plutôt que de tourner le `SpringArm3D` directement : celui-ci porte déjà une rotation *fixe* (l'angle artistique de plongée). Faire cohabiter cet offset fixe avec une rotation *dynamique* clampée sur le même nœud aurait faussé les bornes du clamp (`rotation.x` ne serait pas parti de zéro). Le `CameraPivot` isole la valeur "dynamique pure".
+- Shapecast du `SpringArm3D` non impacté par le changement de parent : le cast part toujours de son origine locale, quel que soit son parent — seule son orientation/position *globale* change (effet recherché : le tangage doit affecter la détection de collision de la caméra).
+
+```gdscript
+@export var camera_pivot_min = -PI/4
+@export var camera_pivot_max = PI/4
+@onready var camera_pivot: Node3D = $CameraPivot
+...
+camera_pivot.rotate_x(-mouse_move.y * camera_speed)
+if camera_pivot.rotation.x > camera_pivot_max or camera_pivot.rotation.x < camera_pivot_min:
+	camera_pivot.rotation.x = clamp(camera_pivot.rotation.x, camera_pivot_min, camera_pivot_max)
+```
+
+- Bornes en **radians bruts** dans l'inspecteur (`PI/4` par défaut de part et d'autre) — pas de conversion degrés↔radians, choix assumé pour rester cohérent avec `rotate_x()` qui travaille nativement en radians. Valeurs à affiner à l'usage.
+- **Bug rencontré et corrigé pendant la session** : le clamp lisait/écrivait initialement `self.rotation.x` (rotation du `CharacterBody3D`) au lieu de `camera_pivot.rotation.x` — confusion entre le nœud sur lequel `rotate_x()` est appelé (`camera_pivot`) et celui vérifié par la condition de clamp (`self`). Symptôme : le clamp semblait ne rien faire. Leçon : bien vérifier que le clamp lit/écrit sur le **même nœud** que celui qui accumule la rotation.
+- Axe inversé (`-mouse_move.y`) pour un ressenti cohérent avec l'inversion déjà faite sur l'axe Y (`-mouse_move.x`) — confort, pas contrainte technique.
+
+**Tangage caméra validé en réseau croisé ✅** — même comportement observé que pour la rotation horizontale : seule l'instance ayant le focus voit sa caméra bouger verticalement, comportement correct des deux côtés.
+
+**Risque de double `change_scene()` — vérifié par relecture de code, écarté ✅**
+
+Retracé les deux chemins (host et join) :
+- **Host** : `main_menu.gd` → `NetworkManager.create_server()` → émet `server_ready` → seul écouteur `SceneManager._on_server_ready()` → `change_scene()` appelé **une fois**.
+- **Client (join)** : `main_menu.gd` → `SceneManager.join_server()` → `change_scene()` appelé **une fois** directement, puis `NetworkManager.join_server()` (qui n'émet pas `server_ready`) → aucun re-déclenchement possible de `_on_server_ready()` côté client.
+- `update_players()` (RPC reçu côté client après validation mot de passe) n'émet plus rien, confirmé — le retrait de `server_ready.emit()` mentionné en session précédente est bien effectif.
+
+**Nuance retenue (pas un bug, une fragilité silencieuse)** : la garantie actuelle repose sur la discipline d'appel (seul `main_menu.gd` orchestre host/join, et n'appelle jamais `create_server()` côté client) plutôt que sur un garde-fou structurel dans le code. Rien n'empêcherait aujourd'hui un futur appel erroné de `create_server()` depuis un contexte client d'émettre `server_ready` par erreur. Non bloquant vu la taille actuelle du projet — à garder en tête si l'architecture se complexifie (plusieurs points d'entrée réseau, reconnexion, etc.).
+
 ## Prochaines étapes
 
-1. **Non testé en réseau réel (2 instances) avec la rotation caméra/perso** : la rotation souris (voir section dédiée ci-dessous) a été validée en local (un seul poste) mais pas encore confirmée en test réseau croisé — vérifier que chaque client capture bien sa propre souris et tourne sa propre caméra (conditionné par `is_multiplayer_authority()`), sans affecter les instances des autres joueurs répliquées localement.
-2. **Tangage caméra (mouvement vertical souris) — non implémenté** : `mouse_move.y` est déjà accumulé mais volontairement inutilisé pour l'instant. Décision prise en session : le mouvement vertical de la souris doit piloter une rotation indépendante du `SpringArm3D` seul (tangage caméra), *sans* affecter la rotation du `CharacterBody3D` qui doit rester à plat. À implémenter dans une session dédiée à l'affinage caméra.
-3. **Gestion d'erreur de connexion (identifiée, non implémentée)** : prévoir un signal (ex. `connection_rejected`) émis par `NetworkManager` en cas de mot de passe incorrect ou de `connection_failed`, pour permettre un retour au menu principal. Actuellement, un client dont la connexion échoue reste bloqué sur `game.tscn` sans réseau. Jugé non urgent pour un premier prototype (repoussé une session).
-4. **Nettoyage mineur** : vérifier qu'il n'y a plus de risque de double `change_scene()` entre `SceneManager.join_server()` et `SceneManager._on_server_ready()` côté client (a priori réglé par le retrait de `server_ready.emit()` dans `update_players()`, à documenter/confirmer explicitement).
-5. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — pas de pendant "client" pour tester ce rôle en isolation. Pas bloquant, le vrai chemin de prod (menu) sert de test client actuellement.
-6. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
+1. **Gestion d'erreur de connexion (identifiée, non implémentée)** : prévoir un signal (ex. `connection_rejected`) émis par `NetworkManager` en cas de mot de passe incorrect ou de `connection_failed`, pour permettre un retour au menu principal. Actuellement, un client dont la connexion échoue reste bloqué sur `game.tscn` sans réseau. Jugé non urgent pour un premier prototype (repoussé plusieurs sessions).
+2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — pas de pendant "client" pour tester ce rôle en isolation. Pas bloquant, le vrai chemin de prod (menu) sert de test client actuellement.
+3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 
 ## Idées notées pour plus tard (hors scope immédiat)
 
