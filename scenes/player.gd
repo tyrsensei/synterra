@@ -4,7 +4,11 @@ class_name Player
 
 @export var speed:= 5
 @export var camera_speed:= 0.005
-@onready var camera_3d: Camera3D = $SpringArm3D/Camera3D
+@export var camera_pivot_min = -PI/4
+@export var camera_pivot_max = PI/4
+
+@onready var camera_pivot: Node3D = $CameraPivot
+@onready var camera_3d: Camera3D = $CameraPivot/SpringArm3D/Camera3D
 
 var mouse_move := Vector2.ZERO
 
@@ -36,6 +40,9 @@ func _physics_process(delta: float) -> void:
 	self.velocity.x = move_direction.x
 	self.velocity.z = move_direction.z
 	rotate_y(-mouse_move.x * camera_speed)
+	camera_pivot.rotate_x(-mouse_move.y * camera_speed)
+	if camera_pivot.rotation.x > camera_pivot_max or camera_pivot.rotation.x < camera_pivot_min:
+		camera_pivot.rotation.x = clamp(camera_pivot.rotation.x, camera_pivot_min, camera_pivot_max)
 	mouse_move = Vector2.ZERO
 	
 	move_and_slide()

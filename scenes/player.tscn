@@ -33,9 +33,12 @@ shape = SubResource("CapsuleShape3D_4nir5")
 [node name="MultiplayerSynchronizer" type="MultiplayerSynchronizer" parent="." unique_id=1506145916]
 replication_config = SubResource("SceneReplicationConfig_u8vuu")
 
-[node name="SpringArm3D" type="SpringArm3D" parent="." unique_id=1268542656]
-transform = Transform3D(1, 0, 0, 0, 0.9680821, 0.25063333, 0, -0.25063333, 0.9680821, 0, 1.5, 0)
+[node name="CameraPivot" type="Node3D" parent="." unique_id=945419372]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+
+[node name="SpringArm3D" type="SpringArm3D" parent="CameraPivot" unique_id=1268542656]
+transform = Transform3D(1, 0, 0, 0, 0.9680821, 0.25063333, 0, -0.25063333, 0.9680821, 0, 0, 0)
 shape = SubResource("SphereShape3D_3vyb7")
 spring_length = 5.0
 
-[node name="Camera3D" type="Camera3D" parent="SpringArm3D" unique_id=1393538205]
+[node name="Camera3D" type="Camera3D" parent="CameraPivot/SpringArm3D" unique_id=1393538205]
