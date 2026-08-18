@@ -3,14 +3,23 @@ extends Node
 var scene_to_load: PackedScene
 var skip_scene_loading: bool = false
 
+signal error(reason: String)
+
 func _ready() -> void:
 	NetworkManager.server_ready.connect(_on_server_ready)
+	NetworkManager.connection_error.connect(_on_connection_error)
 	
 func _on_server_ready() -> void:
 	if not skip_scene_loading:
 		await change_scene()
 	if multiplayer.is_server():
 		NetworkManager.on_scene_loaded_on_server()
+
+func _on_connection_error(reason: String):
+	print_debug("SceneManager:_on_connection_error: ", reason)
+	scene_to_load = preload("res://ui/main_menu.tscn")
+	await change_scene()
+	error.emit(reason)
 
 func join_server(nickname: String, password: String):
 	await change_scene()

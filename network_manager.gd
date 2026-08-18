@@ -2,13 +2,14 @@ extends Node
 
 var players: Dictionary[int, Dictionary]= {}
 var server_password:= ""
-signal server_disconnected
 
 var player_info = {"name": "Name"}
 
 var player_scene: PackedScene = preload("res://scenes/player.tscn")
 
 signal server_ready
+signal server_disconnected
+signal connection_error(reason: String)
 
 func _ready() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -60,7 +61,7 @@ func _on_peer_connected(id: int):
 	
 func _on_peer_disconnected(id: int):
 	print_debug("peer disconnected: ", id)
-	
+	players.erase(id)
 
 func _on_connected_ok():
 	print_debug("on_connected_ok: ", player_info, " (", server_password, ")")
@@ -69,6 +70,8 @@ func _on_connected_ok():
 
 func _on_connected_fail():
 	remove_multiplayer_peer()
+	players.clear()
+	connection_error.emit("Connection failed")
 
 
 func _on_server_disconnected():
@@ -79,13 +82,22 @@ func _on_server_disconnected():
 @rpc("any_peer", "call_remote")
 func update_player_info(peer_player_info: Dictionary, password: String):
 	print_debug("peer_player_info: ", peer_player_info, ", password: ", password)
+	var remote_id := multiplayer.get_remote_sender_id()
 	if password != server_password:
 		print_debug("Password error")
+		rpc_id(remote_id, "notify_connection_error", "Password Error")
+		await get_tree().create_timer(0.1).timeout
+		multiplayer.multiplayer_peer.disconnect_peer(remote_id)
 		return
-	add_player(multiplayer.get_remote_sender_id(), peer_player_info)
+	add_player(remote_id, peer_player_info)
 	update_players.rpc(players)
 
 @rpc("authority", "call_remote")
 func update_players(new_players: Dictionary):
 	print_debug("update_players: ", new_players)
 	players = new_players
+
+@rpc("authority", "call_remote")
+func notify_connection_error(reason: String):
+	print_debug("Error notified: ", reason)
+	connection_error.emit(reason)

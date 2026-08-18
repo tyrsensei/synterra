@@ -38,5 +38,16 @@ text = "Host Game"
 layout_mode = 2
 text = "Join Game"
 
+[node name="Control" type="Control" parent="VBoxContainer" unique_id=425998365]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Error" type="Label" parent="VBoxContainer" unique_id=1704530382]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0, 0, 1)
+theme_override_font_sizes/font_size = 32
+horizontal_alignment = 1
+vertical_alignment = 1
+
 [connection signal="button_up" from="VBoxContainer/HostButton" to="." method="_on_host_button_button_up"]
 [connection signal="button_up" from="VBoxContainer/JoinButton" to="." method="_on_join_button_button_up"]
