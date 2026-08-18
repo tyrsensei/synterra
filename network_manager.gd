@@ -8,6 +8,7 @@ var player_info = {"name": "Name"}
 var player_scene: PackedScene = preload("res://scenes/player.tscn")
 
 signal server_ready
+signal client_ready
 signal server_disconnected
 signal connection_error(reason: String)
 
@@ -95,6 +96,7 @@ func update_player_info(peer_player_info: Dictionary, password: String):
 func update_players(new_players: Dictionary):
 	print_debug("update_players: ", new_players)
 	players = new_players
+	client_ready.emit()
 
 @rpc("authority", "call_remote")
 func notify_connection_error(reason: String):

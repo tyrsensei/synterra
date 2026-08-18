@@ -9,6 +9,7 @@ signal loaded_complete
 func _ready() -> void:
 	NetworkManager.server_ready.connect(_on_server_ready)
 	NetworkManager.connection_error.connect(_on_connection_error)
+	NetworkManager.client_ready.connect(func (): loaded_complete.emit())
 	
 func _on_server_ready() -> void:
 	if not skip_scene_loading:
