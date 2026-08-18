@@ -202,11 +202,39 @@ Retracé les deux chemins (host et join) :
 
 **Nuance retenue (pas un bug, une fragilité silencieuse)** : la garantie actuelle repose sur la discipline d'appel (seul `main_menu.gd` orchestre host/join, et n'appelle jamais `create_server()` côté client) plutôt que sur un garde-fou structurel dans le code. Rien n'empêcherait aujourd'hui un futur appel erroné de `create_server()` depuis un contexte client d'émettre `server_ready` par erreur. Non bloquant vu la taille actuelle du projet — à garder en tête si l'architecture se complexifie (plusieurs points d'entrée réseau, reconnexion, etc.).
 
+**Gestion d'erreur de connexion : implémentée et testée en réseau réel ✅**
+
+Deux cas distincts identifiés et traités séparément, convergeant vers un signal commun côté client :
+
+- **Mot de passe incorrect** : détecté côté serveur dans `update_player_info()` (`@rpc("any_peer")`). Le serveur notifie le client fautif via un RPC ciblé (`rpc_id(remote_id, "notify_connection_error", "Password Error")`), **avant** de forcer sa déconnexion (`multiplayer.multiplayer_peer.disconnect_peer(remote_id)`).
+  - **Piège de timing découvert et corrigé empiriquement** : sans délai, `disconnect_peer()` coupait la connexion avant que le RPC de notification n'ait eu le temps d'être physiquement envoyé (aucune trace du message côté client dans les logs, malgré un ordre d'appel apparemment correct dans le code). Un `await get_tree().create_timer(0.1).timeout` entre les deux appels laisse le temps à ENet de vider sa file d'envoi. Solution validée par test réel (logs confirmant l'ordre correct), pas seulement déduite de la doc — retenir ce réflexe pour tout futur cas "notifier avant de couper la connexion".
+  - RPC dédié `notify_connection_error(reason: String)` (`@rpc("authority", "call_remote")`), reçu côté client, émet le signal `NetworkManager.connection_error`.
+- **Serveur injoignable** (`connection_failed`, signal ENet natif) : déjà câblé sur `_on_connected_fail()`, qui émet directement `connection_error.emit("Connection failed")`. Délai avant déclenchement dépendant du timeout ENet interne (assez long, plusieurs secondes) — acceptable pour un prototype LAN, non retravaillé cette session (voir feedback visuel ci-dessous qui compense ce délai).
+
+**Propagation du signal à travers un changement de scène — piège identifié et résolu :**
+
+Le menu (`main_menu.tscn`) est déchargé dès la tentative de connexion (`SceneManager.join_server()` change de scène *avant* d'appeler `NetworkManager.join_server()`), donc un nœud de `main_menu.gd` qui se serait abonné à un signal dans son propre `_ready()` initial ne peut plus le recevoir — il a été détruit entretemps. Solution : `NetworkManager.connection_error` est écouté par **`SceneManager`** (autoload, survit aux changements de scène), qui recharge `main_menu.tscn` puis émet son propre signal `SceneManager.error(reason)` — écouté à ce moment-là par la **nouvelle** instance de `main_menu.gd`, fraîchement instanciée et donc bien vivante pour recevoir le signal. Pattern à retenir : ne jamais faire porter un signal de flux réseau/scène directement par un nœud de scène qui va et vient — le faire relayer par un autoload.
+
+Affichage du message : `main_menu.tscn` a un nœud `Error` (`Label`), vide par défaut (pas de reset manuel nécessaire — chaque `change_scene_to_packed()` instancie une toute nouvelle scène, donc l'état par défaut est naturellement restauré).
+
+**Feedback "connexion en cours" côté client — implémenté ✅**
+
+Un `Label` "Loading" dans `game.tscn` (`levels/game_ui.gd`, `CanvasLayer`), visible dès l'arrivée sur la scène de jeu (dans les deux rôles), caché une fois la connexion confirmée :
+- **Côté serveur** : `SceneManager._on_server_ready()` émet `loaded_complete` directement après `on_scene_loaded_on_server()`.
+- **Côté client** : nouveau signal dédié `NetworkManager.client_ready`, émis dans `update_players()` (le RPC reçu côté client *après* validation du mot de passe par le serveur — pas dans `_on_connected_ok()`, qui ne signale que la connexion réseau bas niveau, trop tôt puisque le mot de passe n'est pas encore validé à ce stade). `SceneManager` s'y abonne et relaie vers son propre `loaded_complete`, suivant le même principe de découplage que pour `connection_error`.
+- **Piège RPC résolu en cours de route** : une fonction annotée `@rpc` s'exécute sur la machine qui **reçoit** l'appel, pas celle qui l'émet — `update_player_info()` (appelée par le client via `rpc_id(1, ...)`) s'exécute côté **serveur**, pas côté client, ce qui explique un premier essai infructueux d'émettre le signal directement dedans.
+
+**Nettoyage des joueurs déconnectés — implémenté et testé en réseau réel ✅**
+
+Nouvelle fonction `remove_player(player_id)`, symétrique à `add_player()`, appelée depuis `_on_peer_disconnected()` (déjà câblée, gère tout type de déconnexion : volontaire, timeout, forcée par le serveur).
+
+**Piège découvert et corrigé** : `players_container.find_child(str("Player-", player_id))` retournait `null` alors que le nœud était bien visible dans l'arbre distant du débogueur. Cause : `find_child()` a par défaut `owned = true`, qui restreint la recherche aux nœuds ayant un **`owner`** valide. Un nœud instancié dynamiquement via `PackedScene.instantiate()` puis `add_child()` (comme le fait `add_player()`) n'a **aucun owner assigné automatiquement** — contrairement aux nœuds placés dans l'éditeur, où Godot assigne l'owner à la scène automatiquement. `owner` reste donc `null`, ignoré silencieusement par `find_child(owned=true)`. Solution : `find_child(str("Player-", player_id), true, false)` (troisième argument `owned` explicitement à `false`). Diagnostiqué par test empirique (vérification du `player_id` reçu, confirmation que le nœud attendu existe bien dans l'arbre distant) plutôt que par lecture seule de la doc, qui ne précisait pas ce cas implicite.
+
 ## Prochaines étapes
 
-1. **Gestion d'erreur de connexion (identifiée, non implémentée)** : prévoir un signal (ex. `connection_rejected`) émis par `NetworkManager` en cas de mot de passe incorrect ou de `connection_failed`, pour permettre un retour au menu principal. Actuellement, un client dont la connexion échoue reste bloqué sur `game.tscn` sans réseau. Jugé non urgent pour un premier prototype (repoussé plusieurs sessions).
-2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — pas de pendant "client" pour tester ce rôle en isolation. Pas bloquant, le vrai chemin de prod (menu) sert de test client actuellement.
-3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
+1. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié cette session, ne plus le rouvrir comme "manque".
+2. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
+3. **Fondations réseau du prototype considérées closes** après cette session (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions — tous validés en réseau réel à 2 instances). Prochaine session : bascule vers du contenu de jeu (combat, particules élémentaires, ou premier système de gameplay) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
 
 ## Idées notées pour plus tard (hors scope immédiat)
 
