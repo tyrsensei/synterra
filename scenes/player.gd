@@ -11,6 +11,7 @@ class_name Player
 @onready var camera_3d: Camera3D = $CameraPivot/SpringArm3D/Camera3D
 
 var mouse_move := Vector2.ZERO
+var state: States.PlayerState = States.PlayerState.EXPLORATION
 
 func _enter_tree() -> void:
 	var multiplayer_id:= int(self.name.split("-")[1])

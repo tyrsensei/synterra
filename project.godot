@@ -19,6 +19,7 @@ config/icon="res://icon.svg"
 
 NetworkManager="*uid://brpymu8uys1j2"
 SceneManager="*uid://cjriqgchrcrxa"
+States="*uid://b1u716w1xlgk5"
 
 [display]
 
