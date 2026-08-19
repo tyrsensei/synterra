@@ -87,6 +87,16 @@ RPG d'exploration 3D, combats tactiques, inspiré de *Trails in the Sky* (remake
 
 ---
 
+## Architecture des états de jeu (Exploration / Combat / Construction)
+
+Décisions prises en session de design technique (complément direct des sections Combat / Coop / Mode construction ci-dessus) :
+
+- **L'état est par joueur, pas partagé au niveau de l'instance/carte.** Dans une même scène de jeu, un joueur peut rester en exploration pendant qu'un autre est en combat ou que l'hôte est en construction. Ce n'est pas un état global de la carte.
+- **Plusieurs combats simultanés sont possibles dans la même instance.** Un joueur peut lancer un combat pendant qu'un autre groupe de joueurs est déjà engagé ailleurs sur la carte, ou reste en exploration.
+- **Rejoindre un combat n'est possible qu'en phase de préparation.** Une fois le combat passé en phase "en cours", plus aucun joueur ne peut le rejoindre. Implique qu'un combat a un cycle de vie à au moins deux états (préparation / en cours), géré par un système séparé de la state machine par joueur — voir `CombatManager` ci-dessous.
+- **Un `CombatManager` dédié gérera la liste des combats actifs de l'instance** (existence, participants, état préparation/en cours). Non implémenté à ce stade — hors scope de la première session sur les états, qui se limite à la transition d'état par joueur (Exploration/Combat/Construction) sans logique de combat réelle derrière.
+- **Le mode construction est un état de l'hôte uniquement**, sans effet sur l'état des autres joueurs présents (ils peuvent continuer d'explorer ou lancer un combat normalement pendant que l'hôte édite). En revanche, toute modification faite par l'hôte en construction (ajout d'un émetteur de particules, d'un monstre dans un groupe de combat, etc.) est immédiatement répliquée chez les clients — un problème de synchronisation de **contenu**, distinct de la state machine par joueur, à traiter avec un mécanisme dédié (probablement dans l'esprit de ce qui existe déjà pour la position/rotation, à préciser lors de l'implémentation réelle du mode construction).
+
 ## Questions ouvertes (à trancher dans une session future)
 
 - Mécanique précise du mini-jeu bâton : match-3 vs. "machine à sous" élémentaire vs. autre piste

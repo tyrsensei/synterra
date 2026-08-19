@@ -230,6 +230,56 @@ Nouvelle fonction `remove_player(player_id)`, symétrique à `add_player()`, app
 
 **Piège découvert et corrigé** : `players_container.find_child(str("Player-", player_id))` retournait `null` alors que le nœud était bien visible dans l'arbre distant du débogueur. Cause : `find_child()` a par défaut `owned = true`, qui restreint la recherche aux nœuds ayant un **`owner`** valide. Un nœud instancié dynamiquement via `PackedScene.instantiate()` puis `add_child()` (comme le fait `add_player()`) n'a **aucun owner assigné automatiquement** — contrairement aux nœuds placés dans l'éditeur, où Godot assigne l'owner à la scène automatiquement. `owner` reste donc `null`, ignoré silencieusement par `find_child(owned=true)`. Solution : `find_child(str("Player-", player_id), true, false)` (troisième argument `owned` explicitement à `false`). Diagnostiqué par test empirique (vérification du `player_id` reçu, confirmation que le nœud attendu existe bien dans l'arbre distant) plutôt que par lecture seule de la doc, qui ne précisait pas ce cas implicite.
 
+## Session — State machine par joueur (Exploration / Combat / Construction)
+
+**Objectif de session** : poser les fondations du changement d'état par joueur (Exploration / Combat / Construction), sans encore implémenter la logique de déclenchement ni le futur `CombatManager`.
+
+**Décision d'architecture retenue** : l'état est **par joueur**, pas partagé au niveau de l'instance `Game` — un joueur peut rester en exploration pendant qu'un autre est en combat (voir `GAMEPLAY.md` pour le détail du raisonnement gameplay). La variable d'état vit sur `player.gd` (`scenes/player.gd`), l'enum et les RPC de transition vivent dans un autoload dédié (`states.gd`, enregistré sous le nom `States`).
+
+**Pattern RPC retenu (à trois temps)**, cohérent avec l'existant (`update_player_info`) :
+1. Client → serveur : `rpc_id(1, "request_state_change", nouvel_état)` (à câbler côté `player.gd`, pas encore fait)
+2. Serveur, réception : `request_state_change` (`@rpc("any_peer")`), identifie l'auteur via `multiplayer.get_remote_sender_id()`, pas de validation pour l'instant (le futur `CombatManager` en aura la responsabilité)
+3. Serveur → tous : `notify_state_changed` (`@rpc("authority", "call_local")`), résout le nœud `Player` concerné via `get_node_or_null("Players/Player-" + str(player_id))` sur `current_scene`, applique `player.state = new_state`
+
+**Code actuel (`states.gd`, committé)** :
+```gdscript
+extends Node
+
+enum PlayerState {EXPLORATION, FIGHT, BUILD}
+
+@rpc("any_peer")
+func request_state_change(new_state: PlayerState):
+	var player_id := multiplayer.get_remote_sender_id()
+	rpc("notify_state_changed", player_id, new_state)
+
+@rpc("authority", "call_local")
+func notify_state_changed(player_id: int, new_state: PlayerState):
+	var player: Player = get_tree().current_scene.get_node_or_null(
+		str("Players/Player-", player_id)
+	)
+	if player:
+		player.state = new_state
+```
+Et dans `player.gd` : `var state: States.PlayerState = States.PlayerState.EXPLORATION`.
+
+**Piège moteur découvert et documenté — conflit `class_name` / nom d'autoload :**
+
+Un `class_name` et un nom d'autoload (déclaré dans Project Settings > Autoload) partagent le **même espace de noms global** dans Godot 4. Donner à un script autoload un `class_name` identique à son nom d'autoload (ex. `class_name States` sur le script enregistré comme autoload `States`) provoque l'erreur `Class "X" hides an autoload singleton`. Sans `class_name` du tout, Godot attribue à la place un identifiant de type **généré automatiquement** (un hash lié au fichier, ex. `b1u716w1xlgk5`), qui peut être résolu différemment selon le contexte d'où il est référencé dans le code — d'où une possible incompatibilité de type (`states.gd.PlayerState` vs `b1u716w1xlgk5.PlayerState`) entre deux scripts qui pensent pourtant référencer le même enum.
+
+Solution standard (contournement documenté, voir issue Godot #28187 et forum officiel) : donner au script un `class_name` **différent** du nom d'autoload (ex. `class_name GameStates` sur le script enregistré comme autoload `States`) — les appels globaux (`States.xxx`) et le typage (`GameStates.PlayerState`) cohabitent alors sans conflit.
+
+**⚠️ État non résolu à la fin de cette session — point bloquant pour la suite :**
+
+Le fichier `states.gd` actuellement committé **n'a pas de `class_name`**. Le typage fonctionne actuellement dans l'éditeur (`States.PlayerState` dans `player.gd` résout correctement), mais ce comportement s'est avéré **instable pendant la session** : la même erreur de type est apparue puis a disparu à plusieurs reprises selon l'état du cache de l'éditeur et l'ordre de résolution des scripts, sans changement de code entre certaines de ces variations. Rien ne garantit que ce comportement reste stable après un export, sur une autre machine, ou même après un simple reload futur du projet.
+
+**À faire en priorité à la prochaine session, avant toute nouvelle feature sur les états** :
+1. Ajouter `class_name GameStates` en tête de `states.gd` (autoload restant nommé `States` dans Project Settings) pour obtenir un typage stable et documenté plutôt que de compter sur le hash auto-généré
+2. Adapter le typage dans `player.gd` en conséquence (`var state: GameStates.PlayerState = GameStates.PlayerState.EXPLORATION`), en gardant les appels globaux via `States.xxx`
+3. Câbler le déclenchement du changement d'état côté `player.gd` (actuellement absent — rien n'appelle encore `request_state_change`)
+4. Tester en réseau réel à 2 instances (pas encore fait cette session)
+
+**Piège potentiel à surveiller à l'implémentation du déclencheur** : `get_node_or_null()` dans `notify_state_changed` suppose que `current_scene` est bien `Game` et que le chemin `"Players/Player-" + id` est correct — cohérent avec l'architecture actuelle (`game.tscn` : `Game` > `Players`), mais à re-vérifier si la structure de scène évolue (une scène par map, mentionnée comme prévue à terme dans `GAMEPLAY.md`).
+
 ## Prochaines étapes
 
 1. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié cette session, ne plus le rouvrir comme "manque".
