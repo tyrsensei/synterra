@@ -328,6 +328,66 @@ Forme finale correcte : `States.rpc("notify_state_changed", player_id, new_state
 
 **État non testé à la fin de cette session** : les corrections ont été poussées mais pas encore validées en réseau réel à 2 instances (contact ennemi → état FIGHT répliqué côté client). À faire en priorité à la prochaine session avant de construire par-dessus.
 
+## Session — CombatManager, socle (classe `Combat` + squelette `CombatManager`)
+
+**Objectif de session** : poser le socle de `CombatManager` identifié dans `GAMEPLAY.md` (liste des combats actifs, participants, cycle préparation/en cours) — uniquement la structure, sans logique de déclenchement automatique depuis `enemy.gd`, sans ordre de tour, sans test réseau.
+
+**Décision d'architecture retenue — `Combat` en classe dédiée, pas un dictionnaire :**
+
+Un combat individuel est représenté par une classe (`class_name Combat`, `extends RefCounted`) plutôt qu'un dictionnaire brut stocké dans `CombatManager`. Raisons actées en session :
+- Permet de poser des méthodes typées (`add_participant()`, `start()`...) dès maintenant, quitte à les laisser vides au départ, plutôt que de migrer plus tard comme ça a été le cas pour `states.gd`.
+- `RefCounted` suffit (pas besoin de `Node`/`Node3D`) : un combat n'a pas besoin d'exister dans l'arbre de scène ni d'être répliqué comme nœud — sa diffusion se fera par RPC, même pattern que `notify_state_changed`.
+- Pas de conflit `class_name`/autoload (piège #28187 documenté plus haut) : `Combat` n'est **pas** un autoload, seul `CombatManager` l'est.
+
+**Décision actée — `participants` restreint aux joueurs (`Array[Player]`), pas de type généraliste :**
+
+Un ennemi ne "participe" pas à un combat au même sens qu'un joueur (rejoindre/quitter en phase préparation) — il **déclenche** le combat, il n'y figure pas comme participant. `participants` reste donc typé `Array[Player]`, pas d'`Array` générique en prévision des ennemis.
+
+**Code committé (au-delà du stub discuté en session — Julien a implémenté directement) :**
+
+`resources/combat.gd` :
+```gdscript
+extends RefCounted
+class_name Combat
+
+var participants: Array[Player] = []
+var phase: States.CombatState = States.CombatState.PREP
+
+signal combat_end
+signal participant_added(player: Player)
+
+func add_participant(player: Player):
+	participants.append(player)
+	participant_added.emit(player)
+
+func start():
+	phase = States.CombatState.ONGOING
+
+func end():
+	phase = States.CombatState.END
+	combat_end.emit()
+```
+
+`states.gd` : nouvel enum `CombatState {PREP, ONGOING, END}` ajouté à côté de `PlayerState` — le cycle préparation/en cours/fin de `Combat.phase` type sur cet enum plutôt que sur un enum local à `Combat`, cohérent avec le fait que `States` porte déjà tous les enums d'état du projet (`PlayerState`).
+
+`combat_manager.gd` (nouvel autoload `CombatManager`) : squelette minimal pour l'instant, pas encore de méthodes.
+```gdscript
+extends Node
+
+var currents: Array[Combat] = []
+```
+
+**Écart par rapport à ce qui a été discuté en session à noter pour la prochaine reprise :**
+- `end()` et le signal `combat_end` n'étaient pas dans le squelette proposé en session (qui ne couvrait que `add_participant()`/`start()` en `pass`) — ajoutés directement par Julien, phase `END` incluse dans `CombatState`. À valider/discuter si besoin à la prochaine session (notamment : est-ce qu'un combat `END` reste dans `CombatManager.currents` ou en est retiré ?).
+- `phase` typé sur `States.CombatState` (autoload) plutôt que sur un enum local à `Combat` comme initialement esquissé — choix cohérent, pas remis en question, juste à noter comme divergence du brouillon de session.
+
+**Pas fait / prochaine session :**
+- `combat_manager.gd` toujours sans méthodes (`currents` déclaré, rien pour créer/trouver un combat, rien pour y ajouter automatiquement un joueur détecté)
+- Rien de connecté à `enemy.gd` : la détection de contact (`_on_player_detector_body_entered`) appelle toujours directement `States.rpc("notify_state_changed", ...)`, pas encore la création/récupération d'un objet `Combat` via `CombatManager`
+- Question ouverte non tranchée : que devient un `Combat` une fois `end()` appelé — retiré de `currents`, ou conservé avec `phase == END` pour historique ? À trancher à l'implémentation des méthodes de `CombatManager`
+- Ordre de tour toujours pas commencé — vient se greffer sur ce socle une fois `CombatManager` fonctionnel
+- Rien de testé en réseau réel sur cette brique
+
 ## Session — Ennemi minimal (gravité) + rattrapage d'état à la connexion tardive
 
 **Objectif de session** : câbler un ennemi minimal directement dans la scène (placement manuel, pas d'édition), et corriger un bug identifié en testant — un client se connectant après le début d'un combat ne voyait pas l'état FIGHT des joueurs déjà engagés.
