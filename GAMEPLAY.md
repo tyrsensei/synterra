@@ -103,3 +103,8 @@ Décisions prises en session de design technique (complément direct des section
 - Coopération obligatoire sur certains puzzles : oui/non, et si oui, comment éviter la friction pour les joueurs solo
 - Direction artistique : style à définir, tolérant à un niveau de modélisation 3D faible
 - Portée exacte du mode construction en V1 vs. version finale (le test en réseau temps réel est-il un objectif V1 ou une étape ultérieure, une fois le MVP solo de l'éditeur en place ?)
+- **Persistance des niveaux édités** (chargement/sauvegarde) : question soulevée en amont du mode construction — niveau = scène Godot (`PackedScene`) vs. niveau = données pures (`Resource`/JSON). Voir `PROGRESS.md` § Idées notées pour le détail des deux pistes. À trancher lors de la session dédiée au mode construction.
+
+## Choix de conception assumés (rappel)
+
+- **Pas de validation serveur du mouvement/anti-triche** : décision actée, pas un TODO oublié. Synterra est pensé pour être joué en coopératif entre amis, non compétitif — le risque de triche n'est pas une priorité. Le pattern réseau en place permet d'ajouter cette validation plus tard sans tout repenser, si le contexte du jeu change (ex. ouverture à un public plus large).

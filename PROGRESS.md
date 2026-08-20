@@ -328,23 +328,72 @@ Forme finale correcte : `States.rpc("notify_state_changed", player_id, new_state
 
 **État non testé à la fin de cette session** : les corrections ont été poussées mais pas encore validées en réseau réel à 2 instances (contact ennemi → état FIGHT répliqué côté client). À faire en priorité à la prochaine session avant de construire par-dessus.
 
+## Session — Ennemi minimal (gravité) + rattrapage d'état à la connexion tardive
+
+**Objectif de session** : câbler un ennemi minimal directement dans la scène (placement manuel, pas d'édition), et corriger un bug identifié en testant — un client se connectant après le début d'un combat ne voyait pas l'état FIGHT des joueurs déjà engagés.
+
+**Ennemi minimal placé directement dans `Enemies`** : décision actée d'ajouter l'ennemi à la main dans `game.tscn` pour l'instant plutôt que via un outil — cohérent avec le mode construction non encore implémenté (voir "Idées notées pour plus tard" pour la question de persistance de niveau, mise de côté).
+
+**Bug corrigé — gravité absente sur l'ennemi** : `CharacterBody3D` n'applique aucune physique automatiquement (contrairement à `RigidBody3D`) — la gravité doit être accumulée manuellement en `_physics_process()`, exactement comme côté joueur. `enemy.gd` avait un `_on_player_detector_body_entered()` mais pas encore de `_physics_process()`, d'où l'absence de gravité. Corrigé :
+```gdscript
+func _physics_process(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += get_gravity().y * delta
+	move_and_slide()
+```
+
+**Bug identifié et corrigé — état de combat non rattrapé à la connexion tardive :**
+
+`notify_state_changed` (broadcast RPC) diffuse un changement d'état au moment où il se produit, mais ne transmet rien à un client qui se connecte *après* ce changement — aucun mécanisme de rattrapage n'existait. Un joueur A en combat, rejoint par un joueur B après coup, laissait B avec un état obsolète (EXPLORATION) pour A.
+
+**Décision d'architecture — RPC de rattrapage ciblé, pas de synchronizer dédié :**
+
+Piste alternative explorée puis écartée : un second `MultiplayerSynchronizer` à autorité serveur dédié à `state` (parallèle à celui de `position`/`rotation`, qui reste autorité client). Techniquement viable, mais écartée au profit d'une solution RPC pure :
+- Le `MultiplayerSynchronizer` ne fait que de la *diffusion* passive (il ne peut pas insérer de logique de validation/décision dans son flux — l'autorité décide, tout le reste observe, sans étape intermédiaire).
+- Un second synchronizer par propriété "décidée côté serveur" alourdit la scène (nouveau nœud + config éditeur) à chaque nouvelle propriété du même type, alors qu'une fonction de rattrapage générique en RPC scale par simple ajout de ligne dans une boucle existante.
+- Cohérence avec le pattern RPC déjà utilisé partout ailleurs dans le projet (`notify_state_changed`, `update_player_info`...).
+- Pour rappel (piste explorée avec Gemini) : une correction *bidirectionnelle* via synchronizer nécessiterait un split en deux propriétés/synchronizers (un par sens de flux, ex. `client_requested_X` autorité client + `validated_X` autorité serveur) — solution viable mais réservée aux propriétés à haute fréquence de changement (ex. position, si l'anti-triche est un jour rouvert), pas justifiée pour une propriété événementielle comme `state`.
+
+**Implémentation retenue (`states.gd`)** :
+```gdscript
+func _ready() -> void:
+	NetworkManager.client_connected.connect(get_states)
+
+func get_states(client_id: int):
+	var players = get_tree().current_scene.get_node("Players").get_children()
+	for player in players:
+		rpc_id(
+			client_id,
+			"notify_state_changed",
+			player.get_meta("player_id"), player.state
+		)
+```
+Réutilise `notify_state_changed` tel quel (juste ciblé via `rpc_id` au lieu du broadcast habituel), aucune nouvelle structure de message.
+
+**Point de déclenchement — nouveau signal `NetworkManager.client_connected`** : émis dans `update_player_info()` (côté serveur), juste après `add_player()` — le moment où le serveur connaît l'id du nouveau client et vient de l'ajouter à `Players`. Écouté directement par `States` dans son propre `_ready()`, sans passer par `SceneManager` (pas de notion de scène/navigation ici, juste "un joueur est prêt réseau") — cohérent avec la séparation stricte réseau/navigation déjà en place, tout en gardant `network_manager.gd` ignorant de l'existence de `States`.
+
+**Risque de timing identifié mais non problématique en pratique** : `get_states()` suppose que le nouveau client a déjà reçu la réplication des nœuds `Player` existants (via `MultiplayerSpawner`) au moment où le RPC de rattrapage arrive — sinon `get_node_or_null()` échouerait silencieusement côté client. Le mot de passe étant déjà validé à ce stade (connexion établie depuis un moment), la réplication a normalement eu le temps de se faire. **Validé en test réel ✅** — aucun souci observé.
+
+**Piste anti-triche évoquée puis explicitement écartée pour l'instant** : la question de valider `position`/`rotation` côté serveur (empêcher un client de tricher sur sa vitesse de déplacement) a été soulevée en session. Décision actée : **pas de validation pour l'instant**, jeu coopératif entre amis, non compétitif — priorité à la simplicité. Le pattern RPC actuel (`request_state_change`/mouvement autorité client) permet d'insérer une validation ultérieure sans changement de protocole si le besoin apparaît un jour (ex. jeu ouvert au public). Piège technique noté au passage : une tentative de correction de position basée sur un setter de propriété synchronisée avec autorité **client** ne fonctionne pas — le synchronizer ne réplique que dans le sens de l'autorité, une correction serveur assignée localement dans ce cas ne serait jamais renvoyée au client.
+
 ## Prochaines étapes
 
-1. **Tester en réseau réel à 2 instances** le flux complet détection ennemi → `States.rpc("notify_state_changed", ...)` → état répliqué côté client — pas encore fait, priorité avant toute nouvelle feature de combat.
-2. **Point resté en suspens (rappel, non résolu)** : `states.gd` n'a toujours pas de `class_name` dédié (ex. `class_name GameStates`), alors que le risque de résolution de type instable (hash auto-généré) reste documenté depuis la session précédente. Pas encore rouvert cette session — à trancher avant que le typage des états devienne central à davantage d'endroits.
-3. **Première structure de l'ordre de tour** (déplacée de cette session, pas commencée) : ordre des joueurs/ennemis, déplacement borné par tour — premier bloc de `GAMEPLAY.md` § Combat.
-4. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié cette session, ne plus le rouvrir comme "manque".
-2. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
-3. **Fondations réseau du prototype considérées closes** après cette session (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions — tous validés en réseau réel à 2 instances). Prochaine session : bascule vers du contenu de jeu (combat, particules élémentaires, ou premier système de gameplay) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
+1. **Ordre de tour** (reporté deux fois maintenant) : première structure — ordre des joueurs/ennemis, déplacement borné par tour, premier bloc de `GAMEPLAY.md` § Combat. Priorité de la prochaine session.
+2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a deux sessions, ne plus le rouvrir comme "manque".
+3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
+4. **Fondations réseau du prototype considérées closes** (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions, state machine par joueur + rattrapage à la connexion — tous validés en réseau réel). Prochaine session : bascule vers du contenu de jeu (ordre de tour en premier) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
 
 ## Idées notées pour plus tard (hors scope immédiat)
 
 - Mode "construction" in-game (remplaçant potentiel de l'éditeur de niveaux abandonné) : à explorer dans une session dédiée à l'architecture combat/exploration.
 - Exploration et combat prévus dans la **même scène/niveau**, avec état partagé (ex. un feu allumé en exploration doit être utilisable en combat) — pas de `change_scene_to_file()` entre les deux modes, plutôt une machine à états sur place. Question ouverte : à trancher dans une session dédiée à l'architecture du système de combat.
+- **Persistance des niveaux (chargement/sauvegarde)** : question soulevée en plaçant un ennemi manuellement dans `Enemies` — à terme, avec le mode construction, il faudra un mécanisme pour charger/sauvegarder le contenu d'un niveau édité (géométrie, ennemis, zones de patrouille). Deux pistes identifiées à comparer le moment venu : (a) niveau = scène Godot (`PackedScene` + `ResourceSaver`, idiomatique, profite de l'outillage natif), (b) niveau = données pures (`Resource` custom ou JSON, instancié au runtime, plus de contrôle/flexibilité mais réimplémente une partie de la sérialisation native). À trancher dans la session dédiée au mode construction, pas avant.
+- **Validation serveur de la position/du mouvement (anti-triche)** : explicitement mise de côté (voir session ci-dessus) — jeu coopératif entre amis, pas de priorité. À reconsidérer seulement si le jeu s'ouvre un jour à un public non-coopératif/non-amis. Le pattern RPC actuel permet d'ajouter cette validation plus tard sans changement de protocole.
 
 ## Décisions d'architecture (rappel)
 
-- Pattern authoritative pour le réseau (validation serveur), sauf mouvement joueur (autorité client assumée pour l'instant, validation serveur en TODO)
-- Séparation stricte réseau (`network_manager.gd`) / navigation (`scene_manager.gd`) : le réseau ne connaît aucune scène, la navigation ne connaît aucun détail réseau interne
+- Pattern authoritative pour le réseau (validation serveur), sauf mouvement joueur (autorité client assumée, choix définitif pour un jeu coopératif entre amis — pas un TODO, voir "Idées notées pour plus tard")
+- Séparation stricte réseau (`network_manager.gd`) / navigation (`scene_manager.gd`) : le réseau ne connaît aucune scène, la navigation ne connaît aucun détail réseau interne. `States` suit le même principe : écoute les signaux réseau directement, `network_manager.gd` reste ignorant du contenu du jeu.
 - Éditeur de niveaux intégré : abandonné (trop de complexité pour un projet solo) — mode "construction" in-game envisagé comme alternative future
 - Renderer Compatibility (OpenGL 3.3 / ES 3.0) pour accessibilité max + export WebGL
+- Rattrapage d'état pour les connexions tardives : RPC ciblé (`rpc_id`) plutôt que `MultiplayerSynchronizer` dédié, pour toute propriété événementielle décidée côté serveur (voir session ci-dessus pour le raisonnement complet)
