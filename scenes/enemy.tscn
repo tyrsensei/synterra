@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://d14cwon0u5xsk"]
+
+[ext_resource type="Script" uid="uid://dge8g8yfx1uhg" path="res://scenes/enemy.gd" id="1_7p1mj"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_4nir5"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_4nir5"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_4nir5"]
+
+[node name="Enemy" type="CharacterBody3D" unique_id=712132684]
+script = ExtResource("1_7p1mj")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=402378354]
+mesh = SubResource("BoxMesh_4nir5")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=110341043]
+shape = SubResource("BoxShape3D_4nir5")
+
+[node name="PlayerDetector" type="Area3D" parent="." unique_id=527478697]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="PlayerDetector" unique_id=317263722]
+transform = Transform3D(3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0)
+shape = SubResource("SphereShape3D_4nir5")
+
+[connection signal="body_entered" from="PlayerDetector" to="." method="_on_player_detector_body_entered"]
