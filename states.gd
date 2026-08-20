@@ -1,6 +1,7 @@
 extends Node
 
 enum PlayerState {EXPLORATION, FIGHT, BUILD}
+enum CombatState {PREP, ONGOING, END}
 
 func _ready() -> void:
 	NetworkManager.client_connected.connect(get_states)
