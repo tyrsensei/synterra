@@ -280,9 +280,60 @@ Le fichier `states.gd` actuellement committé **n'a pas de `class_name`**. Le ty
 
 **Piège potentiel à surveiller à l'implémentation du déclencheur** : `get_node_or_null()` dans `notify_state_changed` suppose que `current_scene` est bien `Game` et que le chemin `"Players/Player-" + id` est correct — cohérent avec l'architecture actuelle (`game.tscn` : `Game` > `Players`), mais à re-vérifier si la structure de scène évolue (une scène par map, mentionnée comme prévue à terme dans `GAMEPLAY.md`).
 
+## Session — Ennemi minimal + déclenchement du combat par détection
+
+**Objectif de session** : câbler et valider le déclencheur d'état Exploration → Combat, en passant par un ennemi minimal (plutôt qu'un bouton UI jetable), et poser une première structure d'ordre de tour. Seul le premier volet a été traité cette session — l'ordre de tour reste à faire.
+
+**Décisions d'architecture prises avant implémentation :**
+- Ennemi répliqué via le même pattern que le joueur : `EnemiesSpawner` (`MultiplayerSpawner`, spawn path → `Enemies`) + `Enemies` (`Node3D`, sibling de `Players`), ajoutés dans `game.tscn`.
+- Autorité serveur sur les ennemis (pas de notion de "propriétaire client" comme pour le joueur).
+- Détection de mise en combat via une `Area3D` (`PlayerDetector`) portée par chaque ennemi (`enemy.tscn`), pas une structure de détection centralisée — cohérent avec l'architecture caméra du joueur (`SpringArm3D` embarqué).
+- `CharacterBody3D` choisi comme racine de l'ennemi malgré l'absence de mouvement pour l'instant, en anticipation de la patrouille prévue dans `GAMEPLAY.md` — évite une migration de type de nœud plus tard.
+- Nouvelle layer physique dédiée **Layer 3 = "Enemies"** (`project.godot`), distincte de Layer 2 = "Players", pour permettre un filtrage propre côté masks plutôt que par nom de nœud.
+
+**Filtrage du déclenchement — deux protections combinées :**
+1. Garde `if not multiplayer.is_server(): return` dans le callback `body_entered` : la détection tourne localement sur toute instance ayant l'ennemi chargé (spawné via `MultiplayerSpawner`), mais seule l'instance serveur doit agir dessus.
+2. Filtrage physique par `collision_mask` plutôt que par nom de nœud : `PlayerDetector.collision_mask` ciblé sur Layer 2 (Players) uniquement → ne reçoit `body_entered` que pour des corps joueurs, filtrage fait par le moteur physique avant même l'exécution du script. `Enemy.collision_layer = 4` (Layer 3), `Enemy.collision_mask = 7` (collision physique avec décor + joueurs + autres ennemis).
+3. Filtrage de type en complément dans le script (`if body is Player`), rendu possible par le `class_name Player` déjà existant — plus robuste qu'un `body.name.begins_with("Player-")`, écarté en discussion.
+
+**Identification du joueur détecté — métadonnée plutôt que parsing répété :**
+
+Le parsing de l'id depuis le nom du nœud (`"Player-2".split("-")[1]`) restait jusqu'ici unique à `player.gd::_enter_tree()`. Décision : en faire la source de vérité unique, et exposer le résultat via `set_meta("player_id", ...)` pour que les autres consommateurs (comme `enemy.gd`) lisent la métadonnée au lieu de reparser la chaîne. Posé côté serveur dans `network_manager.gd::add_player()` (`player.set_meta("player_id", player_id)`, avant `add_child()`), donc disponible dès l'entrée en scène sur toutes les instances via réplication.
+
+Note de clarification actée : `get_meta`/`set_meta` ne permet de résoudre que dans le sens nœud → valeur, pas l'inverse (pas de recherche de nœud par valeur de métadonnée). Le sens id → nœud (`get_node_or_null("Players/Player-" + str(player_id))`, utilisé dans `notify_state_changed`) reste donc inchangé, structurellement différent du besoin résolu par la meta.
+
+**Déclenchement du changement d'état — appel direct plutôt que réutilisation de `request_state_change` :**
+
+Décision actée : puisque la détection tourne déjà exclusivement côté serveur, faire un aller-retour RPC serveur → serveur via `request_state_change` (pensé pour un déclenchement initié par un *client*, utilisant `multiplayer.get_remote_sender_id()`) n'aurait pas de sens. `enemy.gd` appelle donc directement l'émission de l'état :
+
+```gdscript
+func _on_player_detector_body_entered(body: Node3D) -> void:
+	if not multiplayer.is_server():
+		return
+	if body is Player:
+		States.rpc(
+			"notify_state_changed",
+			body.get_meta("player_id"),
+			States.PlayerState.FIGHT
+		)
+```
+
+**Piège rencontré et corrigé — appel RPC mal formé :**
+
+Premier essai : `States.notify_state_changed(...)` (accès direct par point). Ne déclenche **pas** la réplication : l'annotation `@rpc` ne prend effet que sur un appel via `rpc()`/`rpc_id()`, jamais sur un appel de méthode classique — un appel direct exécute la fonction localement (silencieusement, sans erreur), donnant l'illusion que ça fonctionne en test solo côté serveur, alors que rien n'est diffusé aux clients.
+
+Deuxième piège, sur la correction elle-même : `rpc("États.notify_state_changed", ...)` (nom de méthode "qualifié" en chaîne) — ne fonctionne pas non plus. `rpc()` est une méthode d'instance (`Node.rpc()`) : le récepteur de l'appel RPC est déterminé par l'objet sur lequel `.rpc()` est invoqué, jamais par un chemin composé dans la chaîne de nom. Appeler `rpc(...)` sans le préfixer par `States.` l'exécute sur `self` (ici `enemy.gd`), qui n'a pas de méthode `notify_state_changed`.
+
+Forme finale correcte : `States.rpc("notify_state_changed", player_id, new_state)` — `.rpc()` appelé explicitement sur l'objet `States` (l'autoload), avec le nom simple de la méthode en argument.
+
+**État non testé à la fin de cette session** : les corrections ont été poussées mais pas encore validées en réseau réel à 2 instances (contact ennemi → état FIGHT répliqué côté client). À faire en priorité à la prochaine session avant de construire par-dessus.
+
 ## Prochaines étapes
 
-1. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié cette session, ne plus le rouvrir comme "manque".
+1. **Tester en réseau réel à 2 instances** le flux complet détection ennemi → `States.rpc("notify_state_changed", ...)` → état répliqué côté client — pas encore fait, priorité avant toute nouvelle feature de combat.
+2. **Point resté en suspens (rappel, non résolu)** : `states.gd` n'a toujours pas de `class_name` dédié (ex. `class_name GameStates`), alors que le risque de résolution de type instable (hash auto-généré) reste documenté depuis la session précédente. Pas encore rouvert cette session — à trancher avant que le typage des états devienne central à davantage d'endroits.
+3. **Première structure de l'ordre de tour** (déplacée de cette session, pas commencée) : ordre des joueurs/ennemis, déplacement borné par tour — premier bloc de `GAMEPLAY.md` § Combat.
+4. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié cette session, ne plus le rouvrir comme "manque".
 2. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 3. **Fondations réseau du prototype considérées closes** après cette session (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions — tous validés en réseau réel à 2 instances). Prochaine session : bascule vers du contenu de jeu (combat, particules élémentaires, ou premier système de gameplay) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
 
