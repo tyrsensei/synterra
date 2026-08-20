@@ -8,7 +8,8 @@ func _on_player_detector_body_entered(body: Node3D) -> void:
 		return
 	
 	if body is Player:
-		States.notify_state_changed(
+		States.rpc(
+			"notify_state_changed",
 			body.get_meta("player_id"),
 			States.PlayerState.FIGHT
 		)
