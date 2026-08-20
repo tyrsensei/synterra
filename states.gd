@@ -2,6 +2,9 @@ extends Node
 
 enum PlayerState {EXPLORATION, FIGHT, BUILD}
 
+func _ready() -> void:
+	NetworkManager.client_connected.connect(get_states)
+	
 @rpc("any_peer")
 func request_state_change(new_state: PlayerState):
 	var player_id := multiplayer.get_remote_sender_id()
@@ -14,3 +17,12 @@ func notify_state_changed(player_id: int, new_state: PlayerState):
 	)
 	if player:
 		player.state = new_state
+
+func get_states(client_id: int):
+	var players = get_tree().current_scene.get_node("Players").get_children()
+	for player in players:
+		rpc_id(
+			client_id,
+			"notify_state_changed",
+			player.get_meta("player_id"), player.state
+		)

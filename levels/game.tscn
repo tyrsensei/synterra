@@ -1,8 +1,10 @@
 [gd_scene format=3 uid="uid://tmet2lgan4rd"]
 
 [ext_resource type="Script" uid="uid://br6sdltjvvryr" path="res://levels/game_ui.gd" id="1_m637p"]
+[ext_resource type="PackedScene" uid="uid://d14cwon0u5xsk" path="res://scenes/enemy.tscn" id="1_od3m6"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_fgcmb"]
+size = Vector2(10, 10)
 
 [sub_resource type="ConcavePolygonShape3D" id="ConcavePolygonShape3D_m637p"]
 data = PackedVector3Array(1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, -1, 0, -1, 1, 0, -1)
@@ -25,6 +27,9 @@ spawn_path = NodePath("../Enemies")
 
 [node name="Enemies" type="Node3D" parent="." unique_id=823544215]
 
+[node name="Enemy" parent="Enemies" unique_id=712132684 instance=ExtResource("1_od3m6")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.807807, 1.323319, -10.665312)
+
 [node name="StaticBody3D" type="StaticBody3D" parent="." unique_id=2070954565]
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="StaticBody3D" unique_id=392582430]
@@ -32,7 +37,7 @@ transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0)
 mesh = SubResource("PlaneMesh_fgcmb")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D" unique_id=1913015121]
-transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0)
+transform = Transform3D(25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0)
 shape = SubResource("ConcavePolygonShape3D_m637p")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=2001544536]
