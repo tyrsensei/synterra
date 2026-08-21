@@ -1,4 +1,4 @@
-extends CharacterBody3D
+extends Combatant
 
 class_name Player
 
@@ -11,13 +11,14 @@ class_name Player
 @onready var camera_3d: Camera3D = $CameraPivot/SpringArm3D/Camera3D
 
 var mouse_move := Vector2.ZERO
-var state: States.PlayerState = States.PlayerState.EXPLORATION
+var state: StateManager.PlayerState = StateManager.PlayerState.EXPLORATION
 
 func _enter_tree() -> void:
 	var multiplayer_id:= int(self.name.split("-")[1])
 	set_multiplayer_authority(multiplayer_id)
 
 func _ready() -> void:
+	super()
 	if is_multiplayer_authority():
 		camera_3d.make_current()
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

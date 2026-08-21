@@ -1,18 +1,15 @@
-extends CharacterBody3D
+extends Combatant
 
 class_name Enemy
 
+func _ready() -> void:
+	super()
 
 func _on_player_detector_body_entered(body: Node3D) -> void:
 	if not multiplayer.is_server():
 		return
 	
-	if body is Player:
-		States.rpc(
-			"notify_state_changed",
-			body.get_meta("player_id"),
-			States.PlayerState.FIGHT
-		)
+	CombatManager.handle_contact(body as Player, self)
 
 func _physics_process(delta: float) -> void:
 	if not is_on_floor():

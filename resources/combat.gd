@@ -2,19 +2,32 @@ extends RefCounted
 
 class_name Combat
 
-var participants: Array[Player] = []
-var phase: States.CombatState = States.CombatState.PREP
+var turn_order: Array[Combatant] = []
+var phase: StateManager.CombatState = StateManager.CombatState.PREP
 
 signal combat_end
 signal participant_added(player: Player)
+signal enemy_added(enemy: Enemy)
 
 func add_participant(player: Player):
-	participants.append(player)
+	turn_order.append(player)
 	participant_added.emit(player)
+	player.current_combat = self
+
+func add_enemy(enemy: Enemy):
+	turn_order.append(enemy)
+	enemy_added.emit(enemy)
+	enemy.current_combat = self
 
 func start():
-	phase = States.CombatState.ONGOING
+	turn_order.sort_custom(
+		func(a: Combatant, b: Combatant):
+			return a.initiative > b.initiative
+	)
+	for combatant in turn_order:
+		print_debug("Initiative: ", combatant.name, " -> ", combatant.initiative)
+	phase = StateManager.CombatState.ONGOING
 
 func end():
-	phase = States.CombatState.END
+	phase = StateManager.CombatState.END
 	combat_end.emit()
