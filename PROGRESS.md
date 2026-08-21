@@ -581,13 +581,95 @@ func _physics_process(delta: float) -> void:
 - Déplacement borné par tour, IA basique, arme neutre placeholder — reste du périmètre "systèmes de combat communs" (priorité 1 de `GAMEPLAY.md`)
 - `print_debug()` dans `Combat.start()` à remplacer par un vrai affichage une fois une UI de combat posée
 
+## Session — Progression de tour (`next_turn`, RPC, timer par tour) ✅ testé en réseau réel
+
+**Objectif de session** : faire vivre la progression de tour au-delà du tri initial (`Combat.start()`), avec deux déclencheurs (fin de tour manuelle côté client, timer côté serveur), et diffuser le résultat aux clients.
+
+**`Combat` — ajouts** (`resources/combat.gd`) :
+```gdscript
+var id: int
+var current_turn_index: int = 0
+signal turn_changed(combatant: Combatant)
+
+func get_current_combatant() -> Combatant:
+	return turn_order[current_turn_index]
+
+func next_turn() -> void:
+	current_turn_index = (current_turn_index + 1) % turn_order.size()
+	turn_changed.emit(get_current_combatant())
+```
+- `id` : compteur incrémenté par `CombatManager` à la création (`_next_combat_id`), nécessaire car `currents` seul (position dans le tableau) est fragile si un combat est retiré après `end()`.
+- `turn_changed` suit le même principe que `combat_end`/`participant_added`/`enemy_added` déjà existants sur `Combat` : centralise la réaction à un `next_turn()` (broadcast + relance du timer) en un seul endroit, plutôt que de dupliquer ces deux actions à chaque site d'appel (`request_end_turn` et le timer appellent tous deux `next_turn()`).
+
+**`CombatManager` — RPC de fin de tour, garde double autorisation :**
+```gdscript
+@rpc("any_peer")
+func request_end_turn(combat_id: int):
+	if not multiplayer.is_server():
+		return
+	var sender_id := multiplayer.get_remote_sender_id()
+	var combat := _find_combat(combat_id)
+	if combat == null:
+		return
+	if combat.get_current_combatant().get_meta("player_id") != sender_id:
+		return
+	combat.next_turn()
+```
+- **Deux couches de protection, pas une** : le mode `"any_peer"` + `call_remote` (par défaut) garantit qu'un appel `rpc_id(1, ...)` depuis un client ne s'exécute jamais localement chez l'appelant. Le garde `is_server()` protège contre un appel direct (non-RPC) ou un `rpc_id` mal ciblé vers un autre client — `is_server()` vérifie la machine locale qui exécute, pas l'émetteur. `get_remote_sender_id()` est ensuite infalsifiable (posé par la couche réseau ENet à la réception, pas par le payload envoyé) : un client ne peut pas usurper le `player_id` d'un autre joueur pour finir son tour à sa place.
+- Alternative `@rpc("authority")` évoquée puis écartée : elle contraint qui peut **recevoir** l'appel (l'autorité du nœud, ici le serveur par défaut), pas qui peut **envoyer** — ici n'importe quel client légitime doit pouvoir envoyer, donc `"any_peer"` + vérification manuelle exprime plus précisément l'intention réelle que `"authority"` seul.
+
+**Diffusion — `notify_turn_changed` vit dans `CombatManager`, pas `StateManager` :**
+
+Erreur de conception intermédiaire corrigée en session : un premier essai avait placé `notify_turn_changed` sur `StateManager` par réflexe (pattern déjà vu avec `notify_state_changed`), mais `StateManager` porte les transitions d'état joueur (préoccupation transverse), pas la logique de tour (préoccupation propre au combat, dont `CombatManager` est déjà le point d'entrée unique). Corrigé :
+
+```gdscript
+@rpc("authority", "call_local")
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
+	pass  # côté client : mise à jour UI/curseur de tour
+
+func _on_turn_changed(combatant: Combatant, combat: Combat):
+	rpc("notify_turn_changed", combat.id, combatant.get_path())
+	_start_turn_timer(combat)
+```
+- Diffusion en **broadcast**, choix assumé (pas de ciblage aux seuls participants) : le projet ne dépassera jamais ~10 joueurs simultanés (LAN/hébergé par un joueur), donc le coût réseau du broadcast est non pertinent ici — et ça garde la porte ouverte à un futur mode spectateur/suivi de combat sans migration.
+- `combatant_path` (`NodePath` via `get_path()`) plutôt qu'un id numérique unifié : couvre `Player` et `Enemy` de façon uniforme sans bricoler un id partagé entre deux types différents.
+
+**Timer par tour — `CombatManager`, avec jeton anti-double-déclenchement :**
+
+`Combat` étant un `RefCounted` (pas de `get_tree()` disponible), le timer ne peut vivre que dans `CombatManager` (autoload, `Node`) — même contrainte que pour `_start_combat_timer()` déjà existant.
+
+```gdscript
+func _start_turn_timer(combat: Combat):
+	var turn_snapshot := combat.current_turn_index
+	await get_tree().create_timer(30.0).timeout
+	if combat.current_turn_index == turn_snapshot:
+		combat.next_turn()
+```
+- `turn_snapshot` capturé avant l'attente sert de jeton : si le tour a déjà changé entre-temps (fin de tour manuelle via `request_end_turn` avant expiration du timer), ce timer devenu obsolète ne fait rien à son réveil — évite un double `next_turn()`.
+- Le timer se relance à chaque tour via `_on_turn_changed` (branché sur le signal `turn_changed`), qu'il vienne du timer lui-même ou de `request_end_turn` — un seul point de relance, pas dupliqué à chaque site d'appel de `next_turn()`.
+
+**Bug rencontré et corrigé en session — signature `_on_turn_changed` incomplète :**
+
+`Node(combat_manager.gd)::_on_turn_changed`: Method expected 1 argument(s), but called with 2. Cause : la connexion utilise `.bind(combat)`, donc Godot appelle toujours le callback avec l'argument du signal (`combatant`, ordre du signal) **suivi** de l'argument bindé (`combat`) — la signature doit déclarer les deux, dans cet ordre :
+```gdscript
+func _on_turn_changed(combatant: Combatant, combat: Combat):
+```
+
+**Testé cette session** : validé en réseau réel (2 instances) — fin de tour manuelle et timer déclenchent bien `next_turn()`, diffusion `notify_turn_changed` reçue côté client, pas de double-déclenchement observé entre les deux chemins.
+
+**Pas fait / prochaine session** :
+- `notify_turn_changed` côté client ne fait encore rien (`pass`) — pas d'UI/curseur de tour affiché, juste le RPC qui arrive
+- Déplacement borné par tour (reste du bloc "systèmes de combat communs", priorité 1 de `GAMEPLAY.md`)
+- Durée du timer de tour (30s) à ajuster/valider par le ressenti de jeu, valeur de test pour l'instant
+- IA basique, arme neutre placeholder — toujours pas commencés
+
 ## Idées notées hors scope (ajoutées cette session)
 
 - **Aggro en chaîne** (voir `GAMEPLAY.md` § Combat) : attaquer un ennemi peut alerter un ennemi proche, potentiellement en chaîne — caractéristique possible par type d'ennemi. Non implémenté, noté pour une session dédiée à l'IA ennemie.
 
 ## Prochaines étapes
 
-1. **Ordre de tour** (reporté deux fois maintenant) : première structure — ordre des joueurs/ennemis, déplacement borné par tour, premier bloc de `GAMEPLAY.md` § Combat. Priorité de la prochaine session.
+1. **Déplacement borné par tour** : la progression de tour elle-même (ordre, `next_turn`, RPC, timer) est validée en réseau réel — reste le bloc "déplacement borné" du premier point de `GAMEPLAY.md` § Combat. Priorité de la prochaine session.
 2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a deux sessions, ne plus le rouvrir comme "manque".
 3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 4. **Fondations réseau du prototype considérées closes** (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions, state machine par joueur + rattrapage à la connexion — tous validés en réseau réel). Prochaine session : bascule vers du contenu de jeu (ordre de tour en premier) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
