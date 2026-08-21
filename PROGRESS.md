@@ -436,6 +436,155 @@ Réutilise `notify_state_changed` tel quel (juste ciblé via `rpc_id` au lieu du
 
 **Piste anti-triche évoquée puis explicitement écartée pour l'instant** : la question de valider `position`/`rotation` côté serveur (empêcher un client de tricher sur sa vitesse de déplacement) a été soulevée en session. Décision actée : **pas de validation pour l'instant**, jeu coopératif entre amis, non compétitif — priorité à la simplicité. Le pattern RPC actuel (`request_state_change`/mouvement autorité client) permet d'insérer une validation ultérieure sans changement de protocole si le besoin apparaît un jour (ex. jeu ouvert au public). Piège technique noté au passage : une tentative de correction de position basée sur un setter de propriété synchronisée avec autorité **client** ne fonctionne pas — le synchronizer ne réplique que dans le sens de l'autorité, une correction serveur assignée localement dans ce cas ne serait jamais renvoyée au client.
 
+## Session — Ordre de tour, socle (`Combatant`, `CombatManager.handle_contact`, `Combat.start()`)
+
+**Objectif de session** : poser le premier incrément de l'ordre de tour (report deux fois consécutif), en clarifiant au passage le déclenchement du combat depuis la détection ennemi. Découplage volontaire de l'initiative et du futur système d'équipement (discussion de design approfondie en amont, voir `GAMEPLAY.md` § Système élémentaire / Progression) : initiative posée comme un `int` plat + bruit aléatoire pour tester le tri, sans lien avec une affinité élémentaire pour l'instant.
+
+**Décision d'architecture retenue — classe `Combatant` (héritage), pas de duck typing ni composition :**
+
+`Player` et `Enemy` héritent désormais tous les deux de `Combatant` (`extends CharacterBody3D`, `class_name Combatant`), qui porte les stats de combat partagées :
+```gdscript
+# scenes/combatant.gd
+extends CharacterBody3D
+class_name Combatant
+
+var initiative: int = 0
+var current_combat: Combat = null
+
+func _ready() -> void:
+	initiative = randi_range(0, 10)
+```
+- Alternatives écartées en discussion : duck typing (`has_method`) — perd la sécurité de typage statique déjà pratiquée ailleurs dans le projet (`class_name Player`, filtrage `body is Player`) ; composition via un nœud/ressource `CombatantStats` séparé — ajoute une indirection non justifiée puisque `Player`/`Enemy` partagent déjà le même parent `CharacterBody3D`.
+- Pas de conflit avec le piège `class_name`/autoload (#28187, documenté plus haut) : `Combatant` n'est pas un autoload, seul `StateManager` (ex-`States`, renommé cette session) l'est.
+- `Combatant` reste volontairement un simple porteur de stats de combat (`initiative`, `current_combat`) — pas de mutualisation de la physique/gravité, qui diverge déjà entre `Player` (bloqué par `is_multiplayer_authority()`) et `Enemy` (pas de notion d'autorité client).
+
+**Piège rencontré et corrigé — `_ready()` écrasé silencieusement par l'héritage :**
+
+GDScript n'appelle jamais automatiquement la méthode du parent quand une classe fille redéfinit la même fonction. `player.gd` avait déjà son propre `_ready()` (caméra, capture souris) — en héritant de `Combatant`, ce `_ready()` remplaçait entièrement celui de `Combatant`, empêchant `initiative` d'être randomisée côté joueur, sans erreur ni avertissement. Corrigé par un appel explicite `super()` en première ligne des `_ready()` de `player.gd` et `enemy.gd`.
+
+**Renommage `states.gd` → `state_manager.gd` (autoload `States` → `StateManager`) :**
+
+Renommage assumé cette session, cohérent avec le rôle grandissant de cet autoload (transitions d'état + maintenant appelé directement depuis `CombatManager`). Effectué de façon cohérente dans tous les points d'appel (`state_manager.gd` lui-même, `player.gd`, `combat_manager.gd`, `resources/combat.gd`).
+
+**`Combat` — `participants`/`enemies` fusionnés en un seul `turn_order: Array[Combatant]` :**
+
+Décision actée en discussion : plutôt que deux tableaux séparés (`participants: Array[Player]` + un nouveau tableau ennemis), un seul tableau `turn_order: Array[Combatant]`, alimenté par deux méthodes d'ajout **typées séparément** pour garder la sécurité de typage à l'écriture :
+```gdscript
+# resources/combat.gd
+extends RefCounted
+class_name Combat
+
+var turn_order: Array[Combatant] = []
+var phase: StateManager.CombatState = StateManager.CombatState.PREP
+
+signal combat_end
+signal participant_added(player: Player)
+signal enemy_added(enemy: Enemy)
+
+func add_participant(player: Player):
+	turn_order.append(player)
+	participant_added.emit(player)
+	player.current_combat = self
+
+func add_enemy(enemy: Enemy):
+	turn_order.append(enemy)
+	enemy_added.emit(enemy)
+	enemy.current_combat = self
+
+func start():
+	turn_order.sort_custom(
+		func(a: Combatant, b: Combatant):
+			return a.initiative > b.initiative
+	)
+	for combatant in turn_order:
+		print_debug("Initiative: ", combatant.name, " -> ", combatant.initiative)
+	phase = StateManager.CombatState.ONGOING
+
+func end():
+	phase = StateManager.CombatState.END
+	combat_end.emit()
+```
+- `add_participant()`/`add_enemy()` assignent chacun `current_combat = self` sur le `Combatant` ajouté — c'est le point unique où cette référence est posée (pas dans `CombatManager`), donc garanti cohérent quel que soit l'appelant.
+- Tri par `Array.sort_custom()` avec fonction de comparaison inline, décroissant (`>`) — plus haute initiative en premier, cohérent avec la référence Dofus/Dota discutée en amont.
+- `print_debug()` de vérification laissé en place pour le test manuel de cette session — à retirer ou remplacer par un vrai affichage UI quand le tour par tour aura une interface.
+
+**`CombatManager` — `handle_contact()` implémentée (trouver/créer un combat, déclenchement d'état FIGHT) :**
+
+```gdscript
+# combat_manager.gd
+extends Node
+
+var currents: Array[Combat] = []
+
+func handle_contact(player: Player, enemy: Enemy):
+	# Player can't join 2 combats
+	if player.current_combat:
+		return
+	
+	if enemy.current_combat:
+		if enemy.current_combat.phase != StateManager.CombatState.PREP:
+			return
+		enemy.current_combat.add_participant(player)
+	else:
+		var combat = Combat.new()
+		combat.add_enemy(enemy)
+		combat.add_participant(player)
+		currents.append(combat)
+		_start_combat_timer(combat)
+	
+	StateManager.rpc(
+		"notify_state_changed",
+		player.get_meta("player_id"),
+		StateManager.PlayerState.FIGHT
+	)
+
+func _start_combat_timer(combat: Combat):
+	await get_tree().create_timer(5.0).timeout
+	if combat.phase == StateManager.CombatState.PREP:
+		combat.start()
+```
+
+- **`currents` conservé** (question ouverte en session précédente, tranchée cette session) : usage prévu — affichage debug/liste des combats en cours, et surtout permettre à un joueur de choisir de terminer son action avant de rejoindre un combat en préparation parmi plusieurs actifs simultanément (cohérent avec GAMEPLAY.md : "plusieurs combats simultanés possibles dans la même instance").
+- **Piège de divergence rencontré et corrigé en cours de session** : une première version laissait `StateManager.rpc(..., FIGHT)` inconditionnel en fin de fonction, alors que le chemin "rejoindre un combat déjà `ONGOING`" ne fait plus rien (aucun ajout) — un joueur croisant un ennemi déjà engagé ailleurs se serait retrouvé basculé en état `FIGHT` sans figurer dans aucun `Combat`. Corrigé par un `return` anticipé dans la branche `phase != PREP`, garantissant que tout chemin atteignant le RPC final est passé par un ajout réel — cohérent avec le style déjà utilisé pour le garde `player.current_combat`.
+- **Timer de démarrage** : `get_tree().create_timer()` (timer "one-shot" du `SceneTree`, pas de nœud `Timer` dédié) awaité dans une fonction async de l'autoload `CombatManager` — sûr vis-à-vis du piège d'`await`/coroutine orpheline déjà documenté plus haut (l'autoload ne sera jamais déchargé pendant une partie en cours, contrairement à une scène remplacée). Le garde `if combat.phase == PREP` avant d'appeler `start()` est nécessaire pour éviter un double déclenchement si un futur bouton "go" UI a déjà démarré le combat avant l'expiration du timer. Durée de test actuelle : 5 secondes, à ajuster/remplacer par le bouton "go" dans une session future.
+- Alternative écartée pour le timer : nœud `Timer` réel enfant de `CombatManager` (un par combat) — permettrait pause/annulation propre, mais non justifié tant qu'aucun mécanisme de sortie de combat autre que `start()`/`end()` n'existe.
+
+**`enemy.gd` mis à jour :**
+```gdscript
+extends Combatant
+class_name Enemy
+
+func _ready() -> void:
+	super()
+
+func _on_player_detector_body_entered(body: Node3D) -> void:
+	if not multiplayer.is_server():
+		return
+	
+	CombatManager.handle_contact(body as Player, self)
+
+func _physics_process(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += get_gravity().y * delta
+	
+	move_and_slide()
+```
+
+**⚠️ Point de vigilance non résolu, repéré en fin de session** : le filtrage `if body is Player` (présent dans une session précédente pour ne réagir qu'à un vrai joueur détecté par `PlayerDetector`) a disparu au profit d'un cast direct `body as Player`. Sans risque tant que `PlayerDetector.collision_mask` reste restreint à Layer 2 (Players) — mais si un autre type de corps entre un jour dans la zone, le cast renverrait `null` silencieusement, et `handle_contact()` recevrait un `player` nul sans erreur explicite. À surveiller si de nouveaux types de corps interagissent avec `PlayerDetector` à l'avenir ; pas bloquant aujourd'hui.
+
+**Testé cette session** : test solo (pas encore réseau réel à 2 instances) — contact joueur/ennemi déclenche bien la création du `Combat`, l'ajout à `currents`, le timer, et le passage en état `FIGHT`. Tri de `turn_order` vérifié via `print_debug()`.
+
+**Pas fait / prochaine session** :
+- Test réseau réel à 2 instances sur toute cette chaîne (pas encore fait cette session, contrairement à d'autres briques déjà validées en réseau)
+- Bouton UI "go" pour démarrer le combat avant expiration du timer (le timer seul suffit pour tester, mais le bouton reste à faire)
+- Edge case du second ennemi déjà engagé dans un combat `ONGOING` distinct : actuellement le contact est simplement ignoré (`return` anticipé) plutôt que traité explicitement — comportement correct par accident plutôt que par conception explicite, à repasser en revue si un jour deux ennemis peuvent interagir avec le même joueur en combats séparés
+- Déplacement borné par tour, IA basique, arme neutre placeholder — reste du périmètre "systèmes de combat communs" (priorité 1 de `GAMEPLAY.md`)
+- `print_debug()` dans `Combat.start()` à remplacer par un vrai affichage une fois une UI de combat posée
+
+## Idées notées hors scope (ajoutées cette session)
+
+- **Aggro en chaîne** (voir `GAMEPLAY.md` § Combat) : attaquer un ennemi peut alerter un ennemi proche, potentiellement en chaîne — caractéristique possible par type d'ennemi. Non implémenté, noté pour une session dédiée à l'IA ennemie.
+
 ## Prochaines étapes
 
 1. **Ordre de tour** (reporté deux fois maintenant) : première structure — ordre des joueurs/ennemis, déplacement borné par tour, premier bloc de `GAMEPLAY.md` § Combat. Priorité de la prochaine session.

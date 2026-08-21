@@ -29,6 +29,7 @@ RPG d'exploration 3D, combats tactiques, inspiré de *Trails in the Sky* (remake
   - **Distance** : mini-jeu de visée façon FPS, ciblage de points faibles
   - **Sans visée (bâton/mage)** : support d'équipe, dégâts/effets de zone. Mécanique précise **non tranchée** — pistes ouvertes : match-3, ou mécanique type "machine à sous" octroyant un élément supplémentaire (plus inclusif question accessibilité que le match-3)
 - Ennemis avec zone de patrouille bornée + système d'agressivité (attaque ou non selon proximité)
+- **Idée notée — aggro en chaîne** : attaquer un ennemi peut alerter un ennemi proche, qui peut lui-même en alerter un autre en chaîne. Pourrait devenir une caractéristique par type d'ennemi (certains aident leurs semblables, d'autres non). Non tranché, non implémenté — à creuser lors d'une session dédiée à l'IA ennemie/l'agressivité.
 - **Hypothèse de fun à deux volets, indissociables** : (1) la dimension tactique doit être bonne en soi, (2) la variété *ressentie* entre archétypes d'armes est indispensable — le jugement final sur le fun du combat ne peut se faire qu'avec au moins deux archétypes en main, pas avec un seul
 
 ### Progression / build
