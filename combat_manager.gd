@@ -1,6 +1,7 @@
 extends Node
 
-var currents: Array[Combat] = []
+var currents: Dictionary[int, Combat] = {}
+var _next_combat_id := 0
 
 func handle_contact(player: Player, enemy: Enemy):
 	# Player can't join 2 combats
@@ -13,9 +14,12 @@ func handle_contact(player: Player, enemy: Enemy):
 		enemy.current_combat.add_participant(player)
 	else:
 		var combat = Combat.new()
+		combat.turn_changed.connect(_on_turn_changed.bind(combat))
+		combat.combat_id = _next_combat_id
+		_next_combat_id+=1
 		combat.add_enemy(enemy)
 		combat.add_participant(player)
-		currents.append(combat)
+		currents.set(combat.combat_id, combat)
 		_start_combat_timer(combat)
 	
 	StateManager.rpc(
@@ -28,3 +32,29 @@ func _start_combat_timer(combat: Combat):
 	await get_tree().create_timer(5.0).timeout
 	if combat.phase == StateManager.CombatState.PREP:
 		combat.start()
+
+func _on_turn_changed(combatant: Combatant, combat: Combat):
+	_start_turn_timer(combat)
+	rpc("notify_turn_changed")
+
+func _start_turn_timer(combat: Combat):
+	var saved_turn:= combat.current_turn
+	await get_tree().create_timer(5.0).timeout
+	if combat.current_turn == saved_turn:
+		combat.next_turn()
+
+@rpc("authority", "call_local")
+func notify_turn_changed():
+	print_debug("Turn changed !")
+
+@rpc("any_peer")
+func request_end_turn(combat_id: int):
+	if not multiplayer.is_server():
+		return
+	var remote_id:= multiplayer.get_remote_sender_id()
+	var combat: Combat = currents.get(combat_id)
+	if combat.get_current_combatant().get_meta("player_id") != remote_id:
+		return
+	
+	combat.next_turn()
+	
