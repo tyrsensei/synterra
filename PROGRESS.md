@@ -740,12 +740,120 @@ if current_combat:
 **Testé cette session** : en local (solo, pas encore réseau réel à 2 instances) — entrée en combat, blocage du mouvement hors tour, glissement le long du bord du cercle pendant son tour, reset du cercle constaté au tour suivant.
 
 **Pas fait / prochaine session :**
-- **Validation/snap serveur (approche C actée)** — le clamp actuel n'est que côté client, aucune vérification serveur ne l'accompagne encore. Prochaine étape naturelle de cette feature.
 - Clarifier/trancher le point de vigilance `is_my_turn()`/phase `PREP` ci-dessus
-- Test réseau réel à 2 instances sur le cercle de déplacement (fait seulement en local pour l'instant)
 - Anneau visuel au sol (mesh/decal suivant `move_center`/`move_radius`) — explicitement repoussé à plus tard en session, découplé du clamp par design
-- Recentrage du cercle après une action (dépend d'un système d'action pas encore implémenté) — comportement voulu : après une action, un nouveau cercle avec pour rayon le déplacement restant, centré sur la position au moment de l'action
+- Recentrage du cercle après une action (dépend d'un système d'action pas encore implémenté) — comportement voulu : après une action (jusqu'à 2 déplacements possibles par tour, avec une action facultative entre les deux — attaque, synthèse, autre), un nouveau cercle avec pour rayon le déplacement restant, centré sur la position au moment de l'action. **Non codé actuellement** : `move_max_distance` (actuellement une constante fixe `5.0` sur `Combatant`) représente ce total plafond sur l'ensemble du tour, mais le code ne gère aujourd'hui qu'une seule phase de déplacement — la logique de recentrage/répartition du rayon restant entre deux phases reste entièrement à écrire, une fois le système d'action posé.
 - IA basique, arme neutre placeholder — toujours pas commencés
+
+## Session — Validation serveur du déplacement (approche C) ⚠️ bugs réseau non résolus, à reprendre
+
+**Objectif de session** : implémenter la validation/snap serveur du cercle de déplacement (approche C actée précédemment : client reste autoritaire sur son mouvement, le serveur valide et corrige si nécessaire). Point de départ : le clamp client existait déjà et fonctionnait en local ; cette session couvre uniquement la partie serveur.
+
+**Exigences posées en amont de l'implémentation, qui ont structuré le design :**
+- Validation à des points précis (avant fin de tour, avant action) plutôt qu'en continu à chaque frame
+- Seul le tricheur doit être impacté par une correction — jamais les autres joueurs
+- En début de tour, la position doit être la dernière position connue/validée — y compris si le joueur a triché *pendant le tour des autres* (pas seulement pendant le sien)
+- **Choix explicitement tranché** : exposition brève acceptée si un tricheur est visible une fraction de seconde avant correction (pas de découplage de la réplication continue) — cohérent avec le contexte "coop entre amis, pas d'anti-triche visé" déjà acté ailleurs dans ce document. Conséquence directe de ce choix : la correction se propage automatiquement aux autres clients via le `MultiplayerSynchronizer` existant dès que le tricheur applique sa position corrigée — pas besoin de diffuser la correction soi-même à chaque autre joueur.
+
+**Calcul du cercle factorisé sur `Combatant`** (`scenes/combatant.gd`), utilisé à la fois par le clamp client (glissement de vélocité) et la validation serveur (projection de position) — évite la divergence entre deux implémentations du même calcul géométrique :
+```gdscript
+func circle_overflow_direction(pos: Vector3) -> Vector2:
+	var flat_pos := Vector2(pos.x, pos.z)
+	var flat_center := Vector2(move_center.x, move_center.z)
+	var offset := flat_pos - flat_center
+	if offset.length() <= move_radius:
+		return Vector2.ZERO
+	return offset.normalized()
+
+func clamp_position(pos: Vector3) -> Vector3:
+	var outward := circle_overflow_direction(pos)
+	if outward == Vector2.ZERO:
+		return pos
+	var flat_center := Vector2(move_center.x, move_center.z)
+	var clamped_flat := flat_center + outward * move_radius
+	return Vector3(clamped_flat.x, pos.y, clamped_flat.y)
+```
+- `circle_overflow_direction()` : le noyau géométrique pur, ne touche ni `velocity` ni `global_position` — réutilisable tel quel dans les deux contextes (client en continu dans `_physics_process`, serveur ponctuellement hors `_physics_process`)
+- `clamp_position()` : usage serveur — projette une position sur le bord du cercle si hors limite, sans notion de vélocité (contrairement au client qui fait glisser la vélocité pour un ressenti fluide)
+
+**`last_position` : la donnée qui porte "la dernière position validée", posée sur `Combatant` :**
+```gdscript
+var last_position: Vector3
+
+func _ready() -> void:
+	initiative = randi_range(0, 10)
+	reset_move(global_position)
+
+func reset_move(pos: Vector3):
+	last_position = pos
+	move_center = pos
+	move_radius = move_max_distance
+```
+- **Bug corrigé en session** : `reset_move()` prenait initialement `pos` en paramètre mais `_ready()` n'avait pas encore été mis à jour pour lui passer `global_position` — `last_position` restait à sa valeur par défaut (`Vector3.ZERO`) au tout premier combat, plaçant le premier cercle à l'origine du monde plutôt qu'à la position réelle du joueur. Corrigé.
+- **Piège identifié et évité** : ne **jamais** ajouter `last_position` aux propriétés répliquées par le `MultiplayerSynchronizer`. L'autorité du nœud `Player`, c'est le client — s'il était répliqué, le joueur déciderait lui-même de la valeur diffusée de sa "dernière position valide", ce qui annulerait toute la validation. `last_position` doit rester une donnée que seul le serveur écrit, transmise explicitement par RPC (voir plus bas), jamais lue localement depuis `global_position` par un client.
+
+**Points de validation serveur — factorisés en un seul endroit, appelé depuis les deux sources possibles de fin de tour :**
+```gdscript
+func _end_current_turn(combat: Combat) -> void:
+	var combatant := combat.get_current_combatant()
+	var clamped := combatant.clamp_position(combatant.global_position)
+	if combatant.global_position != clamped:
+		combatant.rpc_id(combatant.get_meta("player_id"), "force_position", clamped)
+	combatant.last_position = clamped
+	combat.next_turn()
+```
+Appelée depuis `request_end_turn` (fin de tour volontaire du joueur) **et** depuis `_start_turn_timer` (expiration du timer, à la place de l'appel direct à `combat.next_turn()` qu'il y avait avant).
+- **Trou de sécurité identifié et corrigé en session** : `combat.next_turn()` peut être déclenché par deux chemins distincts (`request_end_turn` OU expiration du timer). Avant cette factorisation, seul `request_end_turn` validait/clampait la position — un tricheur pouvait se déplacer hors du cercle puis **laisser son timer expirer** plutôt que de terminer son tour volontairement, contournant entièrement la validation. Les deux chemins passent désormais par `_end_current_turn`.
+
+**Point de validation supplémentaire — en début de tour, pour couvrir la triche pendant le tour des autres :**
+```gdscript
+func _on_turn_changed(combatant: Combatant, combat: Combat):
+	_start_turn_timer(combat)
+	if (
+		combatant is Player
+		and not combatant.last_position.is_equal_approx(combatant.global_position)
+	):
+		combatant.rpc_id(
+			combatant.get_meta("player_id"),
+			"force_position",
+			combatant.last_position
+		)
+	rpc("notify_turn_changed", combat.combat_id, combatant.get_path(), combatant.last_position)
+```
+- Complémentaire à `_end_current_turn` : celui-ci valide *son propre* mouvement en fin de son tour ; ce check-ci valide qu'*aucun mouvement n'a eu lieu pendant les tours des autres* — deux fenêtres temporelles différentes, toutes deux nécessaires.
+- Restreint à `Player` (pas `Enemy`, dont le mouvement n'est pas piloté par un client).
+- **Deux bugs trouvés et corrigés en session, tous deux repérés en review de code plutôt qu'en test** :
+  1. **Comparaison stricte (`!=`) remplacée par `is_equal_approx()`** — un `CharacterBody3D` au sol peut légèrement dériver sur `Y` d'une frame à l'autre (micro-jitter du floor snapping de `move_and_slide()`, comportement Godot connu), ce qui déclenchait une correction/RPC à chaque tour même pour un joueur honnête et immobile.
+  2. **Appel RPC mal ciblé** — `rpc_id(...)` était appelé sans le préfixe `combatant.`, ce qui l'exécutait dans le contexte de `CombatManager` (où `force_position` n'existe pas) au lieu du nœud `Combatant` qui porte réellement cette méthode. **Suspecté d'être la cause d'un bug de gameplay observé en session** : le joueur ne pouvait plus se déplacer qu'en glissant le long d'un seul axe dès le début d'un nouveau tour — hypothèse : l'appel RPC cassé interrompait l'exécution de `_on_turn_changed` avant d'atteindre la ligne `rpc("notify_turn_changed", ...)`, empêchant `reset_move()` de s'exécuter et laissant le cercle du tour précédent (déjà largement consommé/décentré) actif pour le nouveau tour. **Non confirmé formellement** — corrigé avant qu'un test isolé n'ait pu valider l'hypothèse précisément, voir "Pas fait" ci-dessous.
+
+**RPC de correction ciblée — `force_position` sur `Combatant`, sécurisée par vérification de l'expéditeur :**
+```gdscript
+@rpc("any_peer")
+func force_position(pos: Vector3):
+	if multiplayer.get_remote_sender_id() == 1:
+		global_position = pos
+```
+- **Bug identifié et corrigé en session** : la première version utilisait `@rpc` sans arguments (équivalent à `@rpc("authority", ...)`), qui restreint l'appel à l'autorité du nœud — or l'autorité d'un `Player`, c'est le client, pas le serveur. Le serveur tentant d'appeler cette RPC depuis un nœud dont il n'est pas l'autorité aurait été silencieusement rejeté par Godot. Corrigé en `@rpc("any_peer")` + vérification manuelle que l'expéditeur est bien le peer serveur (`id == 1`) — même principe de double garde que `request_end_turn` (n'importe qui peut appeler, mais le contenu de la fonction filtre qui est légitime).
+
+**Transport de la position canonique via `notify_turn_changed` — signature enrichie d'un paramètre :**
+```gdscript
+@rpc("authority", "call_local")
+func notify_turn_changed(combat_id: int, combatant_path: NodePath, pos: Vector3):
+	var combatant: Combatant = get_node_or_null(combatant_path)
+	if combatant == null:
+		return
+	combatant.reset_move(pos)
+```
+- Décision structurante prise en session, à ne pas oublier si le pattern est réutilisé ailleurs : **ne jamais laisser un client relire sa propre `global_position` locale pour reconstruire une donnée de validation** (`reset_move()` a été délibérément changé pour recevoir la position en paramètre plutôt que de la lire localement) — un tricheur pourrait sinon transformer sa position trichée en nouvelle référence légitime sur sa propre machine. La valeur canonique doit être calculée une seule fois côté serveur (dans `_end_current_turn` ou `_on_turn_changed`) et voyager telle quelle par RPC jusqu'à toutes les machines, y compris celle du tricheur.
+
+**⚠️ Bugs réseau non résolus, rencontrés en fin de session — à reprendre en priorité :**
+Après application des corrections ci-dessus, des tests réseau réels à 2 instances ont révélé des problèmes non diagnostiqués — nature exacte non déterminée à la fin de la session (Julien a arrêté sur limite de fatigue liée aux problématiques réseau, pas sur un diagnostic clos). Aucun détail précis n'a été recueilli sur les symptômes observés cette fois-ci ; à investiguer dès le début de la prochaine session, idéalement avec des `print_debug` dans `reset_move()`, `_on_turn_changed`, et `force_position` pour tracer la séquence exacte des appels sur les deux machines.
+
+**Non testé formellement, faute de temps** : confirmation que le bug "un seul axe de déplacement" (décrit plus haut, avant les corrections) est bien résolu par les deux correctifs de `_on_turn_changed` — à vérifier en priorité avant de creuser d'éventuels nouveaux bugs, ils pourraient être liés.
+
+**Reste non traité, déjà noté en session précédente, toujours ouvert :**
+- Le `velocity` du joueur n'est pas remis à zéro dans `force_position` — risque de rubber-band (input encore actif recréant immédiatement un dépassement après correction) non vérifié en pratique
+- Point d'ancrage "avant action" pour la validation — toujours un stub réservé, dépend d'un système d'action pas encore implémenté
 
 ## Idées notées hors scope (ajoutées cette session)
 
@@ -753,7 +861,7 @@ if current_combat:
 
 ## Prochaines étapes
 
-1. **Déplacement borné par tour — validation serveur (approche C)** : le cercle de déplacement (client) est implémenté et testé en local — reste à poser la validation/snap côté serveur (le client reste autoritaire, le serveur corrige si le rayon max est dépassé). Priorité de la prochaine session, avant de considérer ce point de `GAMEPLAY.md` § Combat comme clos.
+1. **Déplacement borné par tour — diagnostiquer les bugs réseau de fin de session** : la validation serveur (approche C) est implémentée (clamp factorisé, `last_position` transmis par RPC, corrections ciblées sécurisées) mais des bugs réseau non diagnostiqués sont apparus lors des derniers tests à 2 instances. Priorité absolue de la prochaine session — reprendre avec des `print_debug` ciblés (`reset_move()`, `_on_turn_changed`, `force_position`) avant de considérer ce point de `GAMEPLAY.md` § Combat comme clos.
 2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a deux sessions, ne plus le rouvrir comme "manque".
 3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 4. **Fondations réseau du prototype considérées closes** (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions, state machine par joueur + rattrapage à la connexion — tous validés en réseau réel). Prochaine session : bascule vers du contenu de jeu (ordre de tour en premier) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.

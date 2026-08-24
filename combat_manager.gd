@@ -30,7 +30,7 @@ func handle_contact(player: Player, enemy: Enemy):
 	)
 
 func _start_combat_timer(combat: Combat):
-	await get_tree().create_timer(5.0).timeout
+	await get_tree().create_timer(10.0).timeout
 	if combat.phase == StateManager.CombatState.PREP:
 		combat.start()
 
