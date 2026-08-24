@@ -38,9 +38,9 @@ func _on_turn_changed(combatant: Combatant, combat: Combat):
 	_start_turn_timer(combat)
 	if (
 		combatant is Player
-		and combatant.last_position != combatant.global_position
+		and not combatant.last_position.is_equal_approx(combatant.global_position)
 	):
-		rpc_id(
+		combatant.rpc_id(
 			combatant.get_meta("player_id"),
 			"force_position",
 			combatant.last_position
