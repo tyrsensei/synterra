@@ -31,6 +31,16 @@ func _physics_process(delta: float) -> void:
 	if not is_multiplayer_authority():
 		return
 	
+	camera_pivot.rotate_x(-mouse_move.y * camera_speed)
+	rotate_y(-mouse_move.x * camera_speed)
+	if camera_pivot.rotation.x > camera_pivot_max or camera_pivot.rotation.x < camera_pivot_min:
+		camera_pivot.rotation.x = clamp(camera_pivot.rotation.x, camera_pivot_min, camera_pivot_max)
+	mouse_move = Vector2.ZERO
+	
+	# Don't move if in combat and not my turn
+	if not is_my_turn():
+		return
+	
 	var direction_input:= Input.get_vector("ui_left", "ui_right", "ui_down", "ui_up") * speed
 	var move_direction:Vector3 = (
 		direction_input.x * self.transform.basis.x
@@ -41,10 +51,26 @@ func _physics_process(delta: float) -> void:
 		self.velocity.y += get_gravity().y * delta
 	self.velocity.x = move_direction.x
 	self.velocity.z = move_direction.z
-	rotate_y(-mouse_move.x * camera_speed)
-	camera_pivot.rotate_x(-mouse_move.y * camera_speed)
-	if camera_pivot.rotation.x > camera_pivot_max or camera_pivot.rotation.x < camera_pivot_min:
-		camera_pivot.rotation.x = clamp(camera_pivot.rotation.x, camera_pivot_min, camera_pivot_max)
-	mouse_move = Vector2.ZERO
+	
+	# Limit if in combat
+	if current_combat:
+		var next_pos := global_position + Vector3(velocity.x, 0, velocity.z) * delta
+		var next_pos_flat := Vector2(next_pos.x, next_pos.z)
+		var center_flat := Vector2(move_center.x, move_center.z)
+		
+		if next_pos_flat.distance_to(center_flat) > move_radius:
+			var outward := (next_pos_flat - center_flat).normalized()
+			var flat_velocity := Vector2(velocity.x, velocity.z)
+			flat_velocity = flat_velocity.slide(outward)
+			velocity.x = flat_velocity.x
+			velocity.z = flat_velocity.y
 	
 	move_and_slide()
+
+func is_my_turn() -> bool:
+	if not current_combat:
+		return true
+	return (
+		current_combat.phase == StateManager.CombatState.ONGOING
+		and current_combat.get_current_combatant() == self
+	)

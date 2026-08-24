@@ -35,7 +35,7 @@ func _start_combat_timer(combat: Combat):
 
 func _on_turn_changed(combatant: Combatant, combat: Combat):
 	_start_turn_timer(combat)
-	rpc("notify_turn_changed")
+	rpc("notify_turn_changed", combat.combat_id, combatant.get_path())
 
 func _start_turn_timer(combat: Combat):
 	var saved_turn:= combat.current_turn
@@ -44,8 +44,13 @@ func _start_turn_timer(combat: Combat):
 		combat.next_turn()
 
 @rpc("authority", "call_local")
-func notify_turn_changed():
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
 	print_debug("Turn changed !")
+	var combatant: Combatant = get_node_or_null(combatant_path)
+	if combatant == null:
+		return
+	combatant.reset_move()
+	
 
 @rpc("any_peer")
 func request_end_turn(combat_id: int):
