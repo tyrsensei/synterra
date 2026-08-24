@@ -11,10 +11,11 @@ var last_position: Vector3
 
 func _ready() -> void:
 	initiative = randi_range(0, 10)
-	reset_move()
+	reset_move(global_position)
 
-func reset_move():
-	move_center = last_position
+func reset_move(pos: Vector3):
+	last_position = pos
+	move_center = pos
 	move_radius = move_max_distance
 
 func circle_overflow_direction(pos: Vector3) -> Vector2:
@@ -26,6 +27,7 @@ func circle_overflow_direction(pos: Vector3) -> Vector2:
 	return offset.normalized()
 
 func clamp_position(pos: Vector3) -> Vector3:
+	print_debug("clamp_position: ", pos)
 	var outward := circle_overflow_direction(pos)
 	if outward == Vector2.ZERO:
 		return pos
@@ -33,6 +35,8 @@ func clamp_position(pos: Vector3) -> Vector3:
 	var clamped_flat := flat_center + outward * move_radius
 	return Vector3(clamped_flat.x, pos.y, clamped_flat.y)
 
-@rpc
+@rpc("any_peer")
 func force_position(pos: Vector3):
-	global_position = pos
+	if multiplayer.get_remote_sender_id() == 1:
+		print_debug("force_position: ", pos)
+		global_position = pos
