@@ -663,13 +663,97 @@ func _on_turn_changed(combatant: Combatant, combat: Combat):
 - Durée du timer de tour (30s) à ajuster/valider par le ressenti de jeu, valeur de test pour l'instant
 - IA basique, arme neutre placeholder — toujours pas commencés
 
+## Session — Déplacement borné par tour (cercle de mouvement) ✅ testé en local
+
+**Objectif de session** : implémenter le premier point du bloc "systèmes de combat communs" (`GAMEPLAY.md` § Combat) — déplacement libre borné par tour. Modèle retenu après discussion : un **cercle de déplacement** (pas un odomètre cumulatif) — le joueur se déplace librement tant qu'il reste dans un rayon donné autour d'un centre, plutôt que de consommer un budget à chaque mètre parcouru.
+
+**Décision de conception actée en amont — autorité du mouvement (approche C)** : parmi trois approches comparées (serveur pleinement autoritaire en permanence / bascule d'autorité selon l'état / client autoritaire + validation-snap serveur), **l'approche C est retenue** : le mouvement reste autoritaire côté client comme aujourd'hui (aucun changement du pattern existant), le serveur validera et *snappera* seulement si nécessaire — objectif : parer un client local qui triche sur le rayon max, pas une architecture de mouvement entièrement revue. **Pas encore implémenté** — seul le clamp côté client est en place à ce stade (voir plus bas). Prochaine étape naturelle de cette feature.
+
+**Champs ajoutés sur `Combatant`** (`scenes/combatant.gd`) — stat de combat partagée Player/Enemy, cohérent avec `initiative` :
+```gdscript
+var move_center: Vector3
+var move_radius: float
+var move_max_distance: float = 5.0
+
+func _ready() -> void:
+	initiative = randi_range(0, 10)
+	reset_move()
+
+func reset_move():
+	move_center = global_position
+	move_radius = move_max_distance
+```
+- `reset_move()` posé **génériquement** sur `Combatant` (pas restreint à `Player`) — choix assumé : la donnée est inoffensive sur un `Enemy` (pas encore consommée par une IA de déplacement), et garder `Combatant` comme point d'écriture unique évite une divergence de traitement entre les deux sous-classes plus tard.
+
+**Reset du cercle au changement de tour — branché sur `notify_turn_changed` existant, pas un nouveau listener :**
+
+Le point de blocage rencontré en session : chercher un nouveau point d'accroche (`.connect()` dédié) alors que `notify_turn_changed` (`combat_manager.gd`, RPC `@rpc("authority", "call_local")`) est déjà le point d'arrivée unique de "le tour a changé", sur toute machine, à chaque tour :
+```gdscript
+@rpc("authority", "call_local")
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
+	var combatant: Combatant = get_node_or_null(combatant_path)
+	if combatant == null:
+		return
+	combatant.reset_move()
+```
+- Reset appliqué **sans filtrage** "est-ce que c'est moi" — appelé pour toute instance répliquée du combattant concerné, y compris chez les autres joueurs qui voient une instance distante de ce combattant. Sans danger : ces champs ne sont lus que par le code de mouvement (`player.gd::_physics_process`), déjà gardé par `is_multiplayer_authority()`. Écrire ces valeurs sur une instance distante n'a aucun effet, ce code ne s'exécute jamais pour elle localement.
+
+**Gating "c'est mon tour" — `is_my_turn()` sur `player.gd` :**
+```gdscript
+func is_my_turn() -> bool:
+	if not current_combat:
+		return true
+	return (
+		current_combat.phase == StateManager.CombatState.ONGOING
+		and current_combat.get_current_combatant() == self
+	)
+```
+**⚠️ Point de vigilance non résolu, à confirmer** : cette fonction renvoie `false` dès qu'un `current_combat` existe et que sa `phase` n'est pas `ONGOING` — donc **le mouvement est bloqué dès le contact avec un ennemi**, y compris pendant `PREP` (avant l'expiration du timer de démarrage / avant que tout le monde ait rejoint). L'hypothèse de travail discutée en session précédant l'implémentation était plutôt : en `PREP`, tout le monde reste libre de bouger comme en exploration, seul `ONGOING` doit brider le hors-tour. Comportement actuel non confirmé comme voulu — à trancher/valider avant de considérer cette brique complètement close.
+
+**Clamp de mouvement — `player.gd::_physics_process`, avant `move_and_slide()` :**
+```gdscript
+# Limit if in combat
+if current_combat:
+	var next_pos := global_position + Vector3(velocity.x, 0, velocity.z) * delta
+	var next_pos_flat := Vector2(next_pos.x, next_pos.z)
+	var center_flat := Vector2(move_center.x, move_center.z)
+	
+	if next_pos_flat.distance_to(center_flat) > move_radius:
+		var outward := (next_pos_flat - center_flat).normalized()
+		var flat_velocity := Vector2(velocity.x, velocity.z)
+		flat_velocity = flat_velocity.slide(outward)
+		velocity.x = flat_velocity.x
+		velocity.z = flat_velocity.y
+```
+- **Distance calculée en 2D (`X`/`Z`), `Y` volontairement exclu** : décision prise en anticipation du futur anneau visuel au sol (mesh/decal plat) — la contrainte doit raisonner dans le même plan que ce que le joueur verra affiché, sinon sauter ou descendre une pente ferait ressentir une limite incohérente avec l'anneau affiché. Piège de nommage à surveiller en cas de réutilisation de ce pattern : `Vector2` n'a que `.x`/`.y` — remonter vers `velocity.z` nécessite de lire `flat_velocity.y`, pas `.z`.
+- **Glissement (`Vector2.slide()`) choisi plutôt que blocage net** : le joueur longe le bord du cercle au lieu d'être stoppé net au premier contact — ressenti plus agréable, validé en test.
+- **Placement avant `move_and_slide()`, sur `velocity`, pas de correction de `global_position` après coup** : nécessaire pour rester cohérent avec la gestion des collisions physiques déjà faite en interne par `move_and_slide()` (murs, autres joueurs) — une correction de position a posteriori court-circuiterait ce que `move_and_slide()` vient de faire et pourrait traverser un obstacle évité entre-temps.
+
+**Idée notée hors scope — ressource élémentaire en début de tour** (évoquée par Julien en discutant du budget de déplacement, à ne pas perdre) : possibilité de récupérer un ou plusieurs éléments en début de tour en étant suffisamment proche d'un émetteur. Non lié au déplacement borné en lui-même — à rattacher à une session sur le système élémentaire/équipement. Voir aussi `GAMEPLAY.md` § Idées notées hors scope.
+
+**Renommages/évolutions constatés sur `Combat` depuis la dernière session documentée** (`resources/combat.gd`), non discutés en session mais actés par lecture du code committé :
+- `id` → `combat_id`, `current_turn_index` → `current_turn` (initialisé à `-1`)
+- `start()` appelle désormais `next_turn()` immédiatement après le tri — résout l'ambiguïté notée précédemment ("`current_turn_index` reste à 0 par défaut, pas encore significatif en `PREP`") : `get_current_combatant()` est valide dès le passage en `ONGOING`, plus de valeur par défaut arbitraire à ce moment-là.
+- `CombatManager.currents` : `Array[Combat]` → `Dictionary[int, Combat]` (clé = `combat_id`) — résout la fragilité notée précédemment ("`id` nécessaire car position dans le tableau fragile si un combat est retiré après `end()`"), accès direct par id plutôt que recherche linéaire.
+- Durée du timer de tour (`_start_turn_timer`) : `30.0` → `5.0` — valeur de test resserrée pour itérer plus vite en session, à ajuster/valider par le ressenti de jeu comme déjà noté précédemment.
+
+**Testé cette session** : en local (solo, pas encore réseau réel à 2 instances) — entrée en combat, blocage du mouvement hors tour, glissement le long du bord du cercle pendant son tour, reset du cercle constaté au tour suivant.
+
+**Pas fait / prochaine session :**
+- **Validation/snap serveur (approche C actée)** — le clamp actuel n'est que côté client, aucune vérification serveur ne l'accompagne encore. Prochaine étape naturelle de cette feature.
+- Clarifier/trancher le point de vigilance `is_my_turn()`/phase `PREP` ci-dessus
+- Test réseau réel à 2 instances sur le cercle de déplacement (fait seulement en local pour l'instant)
+- Anneau visuel au sol (mesh/decal suivant `move_center`/`move_radius`) — explicitement repoussé à plus tard en session, découplé du clamp par design
+- Recentrage du cercle après une action (dépend d'un système d'action pas encore implémenté) — comportement voulu : après une action, un nouveau cercle avec pour rayon le déplacement restant, centré sur la position au moment de l'action
+- IA basique, arme neutre placeholder — toujours pas commencés
+
 ## Idées notées hors scope (ajoutées cette session)
 
 - **Aggro en chaîne** (voir `GAMEPLAY.md` § Combat) : attaquer un ennemi peut alerter un ennemi proche, potentiellement en chaîne — caractéristique possible par type d'ennemi. Non implémenté, noté pour une session dédiée à l'IA ennemie.
 
 ## Prochaines étapes
 
-1. **Déplacement borné par tour** : la progression de tour elle-même (ordre, `next_turn`, RPC, timer) est validée en réseau réel — reste le bloc "déplacement borné" du premier point de `GAMEPLAY.md` § Combat. Priorité de la prochaine session.
+1. **Déplacement borné par tour — validation serveur (approche C)** : le cercle de déplacement (client) est implémenté et testé en local — reste à poser la validation/snap côté serveur (le client reste autoritaire, le serveur corrige si le rayon max est dépassé). Priorité de la prochaine session, avant de considérer ce point de `GAMEPLAY.md` § Combat comme clos.
 2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a deux sessions, ne plus le rouvrir comme "manque".
 3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 4. **Fondations réseau du prototype considérées closes** (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions, state machine par joueur + rattrapage à la connexion — tous validés en réseau réel). Prochaine session : bascule vers du contenu de jeu (ordre de tour en premier) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.

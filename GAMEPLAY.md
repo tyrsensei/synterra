@@ -24,6 +24,8 @@ RPG d'exploration 3D, combats tactiques, inspiré de *Trails in the Sky* (remake
 
 ### Combat
 - Tour par tour, déplacement libre borné par tour, forte dimension tactique/puzzle (référence **Dofus**)
+- **Déplacement borné — modèle retenu (précision technique actée)** : un cercle de déplacement (centre + rayon), pas un budget cumulatif de distance parcourue. Après une action, un nouveau cercle est recentré sur la position au moment de l'action, avec pour rayon le déplacement restant — permet de bouger, agir, puis se replacer (couverture, proximité d'une source d'élément) sans pénaliser les allers-retours. Détail d'implémentation dans `PROGRESS.md`.
+- **Idée notée — élément récupérable en début de tour** : possibilité de récupérer un ou plusieurs éléments en début de tour en étant suffisamment proche d'un émetteur élémentaire. Non tranché (quantité, rayon de proximité, type d'émetteur) — à creuser lors d'une session dédiée au système élémentaire/équipement.
 - Trois archétypes d'armes, chacun avec un mini-jeu propre :
   - **Corps à corps** : système de combo (actions bonus si bien exécuté)
   - **Distance** : mini-jeu de visée façon FPS, ciblage de points faibles
