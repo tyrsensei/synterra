@@ -35,6 +35,15 @@ func _start_combat_timer(combat: Combat):
 
 func _on_turn_changed(combatant: Combatant, combat: Combat):
 	_start_turn_timer(combat)
+	if (
+		combatant is Player
+		and combatant.last_position != combatant.global_position
+	):
+		rpc_id(
+			combatant.get_meta("player_id"),
+			"force_position",
+			combatant.last_position
+		)
 	rpc("notify_turn_changed", combat.combat_id, combatant.get_path())
 
 func _start_turn_timer(combat: Combat):
@@ -58,8 +67,13 @@ func request_end_turn(combat_id: int):
 		return
 	var remote_id:= multiplayer.get_remote_sender_id()
 	var combat: Combat = currents.get(combat_id)
-	if combat.get_current_combatant().get_meta("player_id") != remote_id:
+	var combatant = combat.get_current_combatant()
+	if combatant.get_meta("player_id") != remote_id:
 		return
 	
+	var clamp_position = combatant.clamp_position(combatant.global_position)
+	if combatant.global_position != clamp_position:
+		combatant.rpc_id(remote_id, "force_position", clamp_position)
+	combatant.last_position = clamp_position
 	combat.next_turn()
 	

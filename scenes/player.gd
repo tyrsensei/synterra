@@ -55,13 +55,9 @@ func _physics_process(delta: float) -> void:
 	# Limit if in combat
 	if current_combat:
 		var next_pos := global_position + Vector3(velocity.x, 0, velocity.z) * delta
-		var next_pos_flat := Vector2(next_pos.x, next_pos.z)
-		var center_flat := Vector2(move_center.x, move_center.z)
-		
-		if next_pos_flat.distance_to(center_flat) > move_radius:
-			var outward := (next_pos_flat - center_flat).normalized()
-			var flat_velocity := Vector2(velocity.x, velocity.z)
-			flat_velocity = flat_velocity.slide(outward)
+		var outward := circle_overflow_direction(next_pos)
+		if outward != Vector2.ZERO:
+			var flat_velocity := Vector2(velocity.x, velocity.z).slide(outward)
 			velocity.x = flat_velocity.x
 			velocity.z = flat_velocity.y
 	
