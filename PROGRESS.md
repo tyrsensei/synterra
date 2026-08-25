@@ -919,6 +919,13 @@ CombatManager.current_turn_combatant[current_combat_id]
 - Remise à zéro de `current_combat_id`/`current_turn_combatant` à la fin d'un combat : rien ne notifie la fin de combat côté réseau aujourd'hui (`Combat.end()` reste un signal purement serveur) — déjà noté comme lacune, toujours ouvert.
 - Anneau visuel au sol, recentrage du cercle après action, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
 
+**Bug annexe corrigé dans la foulée — l'ennemi se faisait pousser en marchant dessus, indépendamment du bug réseau ci-dessus :**
+Root cause distincte, purement physique (pas de réseau ici) : asymétrie entre les `collision_mask` de `Player` et `Enemy`. `Player.collision_mask = 3` (layers 1+2) ne contenait pas le layer de `Enemy` (layer 3, valeur `4`) — le joueur traversait donc physiquement l'ennemi sans jamais être bloqué. `Enemy.collision_mask = 7` (layers 1+2+3), lui, contenait le layer de `Player` (layer 2, valeur `2`) — quand `Enemy._physics_process()` (côté serveur) découvrait son propre `CharacterBody3D` en chevauchement avec celui du joueur qui venait de le traverser, la dépénétration automatique de `move_and_slide()` déplaçait l'ennemi pour résoudre le chevauchement. Aucun code de poussée explicite : effet de bord de cette asymétrie.
+
+Corrigé des deux côtés :
+- `Player.collision_mask` : `3` → `7` (ajout du layer de `Enemy`) — le joueur est désormais physiquement bloqué par l'ennemi comme par un mur, le chevauchement ne se produit plus.
+- `Enemy.collision_mask` : `7` → `5` (retrait du layer de `Player`) — défense en profondeur : l'ennemi ignore désormais physiquement les joueurs, ne s'appuie plus que sur `PlayerDetector` (`Area3D`, layer/mask distincts, non affecté par ce changement) pour la détection de contact. Même en cas de léger chevauchement dû à un décalage réseau, l'ennemi ne réagirait plus en se déplaçant.
+
 ## Prochaines étapes
 
 1. **Bascule vers le contenu de jeu** : le déplacement borné par tour est désormais validé de bout en bout en réseau réel (anti-triche mis de côté, bug de synchronisation `current_combat_id` corrigé). Comme prévu depuis la session précédente : priorité au contenu de jeu (système d'action — attaque/synthèse — plutôt qu'à de nouvelles briques réseau).
