@@ -15,12 +15,12 @@ signal turn_changed(combatant: Combatant)
 func add_participant(player: Player):
 	turn_order.append(player)
 	participant_added.emit(player)
-	player.current_combat = self
+	player.current_combat_id = self.combat_id
 
 func add_enemy(enemy: Enemy):
 	turn_order.append(enemy)
 	enemy_added.emit(enemy)
-	enemy.current_combat = self
+	enemy.current_combat_id = self.combat_id
 
 func start():
 	turn_order.sort_custom(

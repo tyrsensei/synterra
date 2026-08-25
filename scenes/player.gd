@@ -53,20 +53,24 @@ func _physics_process(delta: float) -> void:
 	self.velocity.z = move_direction.z
 	
 	# Limit if in combat
-	if current_combat:
+	if current_combat_id != -1:
 		var next_pos := global_position + Vector3(velocity.x, 0, velocity.z) * delta
-		var outward := circle_overflow_direction(next_pos)
-		if outward != Vector2.ZERO:
-			var flat_velocity := Vector2(velocity.x, velocity.z).slide(outward)
+		var next_pos_flat := Vector2(next_pos.x, next_pos.z)
+		var center_flat := Vector2(move_center.x, move_center.z)
+		
+		if next_pos_flat.distance_to(center_flat) > move_radius:
+			var outward := (next_pos_flat - center_flat).normalized()
+			var flat_velocity := Vector2(velocity.x, velocity.z)
+			flat_velocity = flat_velocity.slide(outward)
 			velocity.x = flat_velocity.x
 			velocity.z = flat_velocity.y
 	
 	move_and_slide()
 
 func is_my_turn() -> bool:
-	if not current_combat:
+	if current_combat_id == -1:
 		return true
+	
 	return (
-		current_combat.phase == StateManager.CombatState.ONGOING
-		and current_combat.get_current_combatant() == self
+		CombatManager.current_turn_combatant.get(current_combat_id) == self
 	)

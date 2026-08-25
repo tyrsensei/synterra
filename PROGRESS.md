@@ -859,12 +859,72 @@ Après application des corrections ci-dessus, des tests réseau réels à 2 inst
 
 - **Aggro en chaîne** (voir `GAMEPLAY.md` § Combat) : attaquer un ennemi peut alerter un ennemi proche, potentiellement en chaîne — caractéristique possible par type d'ennemi. Non implémenté, noté pour une session dédiée à l'IA ennemie.
 
+## Session — Suppression de l'anti-triche + correction du bug de mouvement réseau (déplacement borné par tour) ✅ validé en réseau réel
+
+**Objectif de session** : reprendre le point bloquant laissé en suspens à la session précédente (bugs réseau non diagnostiqués sur le déplacement borné par tour). Décision prise en cours de session : plutôt que de poursuivre le diagnostic de la couche de validation serveur (approche C), la retirer entièrement pour se recentrer sur le contenu de jeu — cohérent avec l'anti-triche déjà explicitement écarté ailleurs dans ce document (jeu coopératif entre amis, pas de priorité).
+
+**Retrait de la couche anti-triche — revert git ciblé (option A) :**
+La frontière entre le cercle de déplacement (mécanique de gameplay, commit `4d58f75`) et la validation serveur (`force_position`, `last_position`, `clamp_position` appelés depuis `combat_manager.gd`, ajoutés dans les 4 commits `WIP clamp movements in combat` suivants) était nette dans l'historique git. Fichiers concernés (`combat_manager.gd`, `scenes/combatant.gd`, `scenes/player.gd`) réécrits au contenu exact du commit `4d58f75` (`git show 4d58f75:<fichier> > <fichier>`, en contournant une restriction locale empêchant `git checkout` de remplacer les fichiers directement). Effet de bord accepté : le délai de `PREP` (`_start_combat_timer`) repasse de 10s à 5s, valeur d'avant l'anti-triche.
+
+**Nouveau bug découvert en testant en réseau réel à 2 instances, distinct de celui de la session précédente :**
+Une fois l'anti-triche retiré, deux symptômes observés côté joueur qui rejoint (pas l'hôte) : le mouvement n'est jamais bloqué hors tour, et l'ennemi se fait pousser quand ce joueur marche dessus.
+
+**Cause racine identifiée — `current_combat` n'était jamais qu'une référence locale au serveur :**
+```gdscript
+# Combat.add_participant(), tourne uniquement côté serveur
+player.current_combat = self
+```
+`current_combat` n'est ni répliqué (le `SceneReplicationConfig` ne couvre que `position`/`rotation`) ni transmis par RPC — cette affectation ne modifie que la copie du `Player` que le serveur possède dans son propre arbre de scène. Pour l'hôte, aucun symptôme : son `Player` local et celui manipulé par le serveur sont le même objet. Pour le joueur qui rejoint, ce sont deux instances distinctes — `current_combat` restait `null` indéfiniment chez lui, donc `is_my_turn()` toujours vrai (pas de blocage), et le clamp du cercle jamais actif. Le joueur marchait donc librement à travers l'ennemi ; côté serveur, `Enemy._physics_process()` (qui tourne bien là-bas) résolvait le chevauchement via la dépénétration automatique de `move_and_slide()`, poussant l'ennemi — d'où l'impression que "le joueur pousse l'ennemi".
+
+**Refactor mené en plusieurs étapes sur la session :**
+
+1. `current_combat: Combat` → `current_combat_id: int = -1` sur `Combatant` — un objet `Combat` (`RefCounted`) n'existe de toute façon que côté serveur et n'est pas transmissible tel quel par RPC ; seul un identifiant simple a du sens côté client. Sentinelle `-1` retenue par cohérence avec `Combat.current_turn`, qui utilise déjà cette convention.
+2. `is_my_turn()` ne peut plus interroger un objet `Combat` inexistant côté client pour savoir qui joue. Ajout de `CombatManager.current_turn_combatant: Dictionary[int, Combatant]`, alimenté dans le handler déjà broadcasté de `notify_turn_changed` (RPC existante, `call_local`, atteint tous les pairs à chaque tour) :
+```gdscript
+@rpc("authority", "call_local")
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
+	var combatant: Combatant = get_node_or_null(combatant_path)
+	if combatant == null:
+		return
+	current_turn_combatant[combat_id] = combatant
+	combatant.reset_move()
+```
+`is_my_turn()` compare simplement `CombatManager.current_turn_combatant.get(current_combat_id) == self` — plus besoin de connaître `phase` séparément : `notify_turn_changed` n'est jamais émise avant que `combat.start()` (qui bascule en `ONGOING`) n'ait tourné, donc tant qu'aucune entrée n'existe pour ce `combat_id`, le mouvement reste bloqué — comportement inchangé pendant la `PREP` (point de vigilance déjà noté dans une session précédente, volontairement non retouché ici).
+3. Restait à transmettre `current_combat_id` lui-même au client — jusque-là toujours écrit uniquement côté serveur dans `Combat.add_participant`/`add_enemy`, jamais diffusé. Choix retenu : étendre `notify_state_changed` (déjà appelée au bon moment dans `handle_contact`, déjà dotée de la résolution `Players/Player-<id>`) plutôt que dupliquer une RPC quasi identique :
+```gdscript
+@rpc("authority", "call_local")
+func notify_state_changed(player_id: int, new_state: PlayerState, combat_id: int = -1):
+	var player: Player = get_tree().current_scene.get_node_or_null(str("Players/Player-", player_id))
+	if player:
+		player.state = new_state
+		player.current_combat_id = combat_id
+```
+`combat_id` par défaut à `-1` pour ne pas casser les changements d'état sans lien avec un combat (`request_state_change`, potentiel futur `BUILD`). `get_states()` (rattrapage à la connexion) mis à jour en cohérence pour transmettre aussi `player.current_combat_id`.
+
+**Deux bugs annexes trouvés et corrigés pendant le refactor, repérés en relecture avant même le test réseau :**
+- `resources/combat.gd` : `add_participant`/`add_enemy` avaient gardé `player.current_combat = self.combat_id` après le renommage du champ en `current_combat_id` — référence à un champ qui n'existait plus.
+- `combat_manager.gd` : `if player.current_combat_id:` / `if enemy.current_combat_id:` — test de vérité brut sur un `int`, alors que `0` est falsy en GDScript. Cassait spécifiquement pour le tout premier combat créé (`_next_combat_id` démarre à `0`). Corrigé en comparaison explicite `!= -1`.
+
+**Crash rencontré au premier test réseau, corrigé — accès par crochets sur `Dictionary` typé :**
+```gdscript
+# Levait "Out of bounds get index '0' (on base: 'Dictionary[int, Combatant]')"
+CombatManager.current_turn_combatant[current_combat_id]
+```
+`current_combat_id` passe à `0` dès le contact (via `notify_state_changed`), avant que `current_turn_combatant[0]` n'existe (rempli seulement après `combat.start()`, donc après les 5s de `PREP`) — fenêtre où l'accès par crochets sur un `Dictionary` typé lève une erreur au lieu de renvoyer `null` (contrairement à un dictionnaire non typé). Corrigé en `.get(current_combat_id)`.
+
+**Testé cette session, en réseau réel à 2 instances** : déplacement borné par tour confirmé fonctionnel — blocage hors tour effectif pour le joueur qui rejoint (pas seulement l'hôte), plus de poussée de l'ennemi par contact. Referme le point resté ouvert depuis la session précédente.
+
+**Pas fait / prochaine session :**
+- Rattrapage à la connexion tardive pendant un combat en cours : `get_states()` transmet bien `current_combat_id`, mais `current_turn_combatant` (qui indique qui joue) n'est rempli que par les futurs appels de `notify_turn_changed` — un client rejoignant en plein combat n'aura l'info "qui joue" qu'au tour suivant, pas immédiatement. Non testé, à vérifier si ce cas se présente en pratique.
+- Remise à zéro de `current_combat_id`/`current_turn_combatant` à la fin d'un combat : rien ne notifie la fin de combat côté réseau aujourd'hui (`Combat.end()` reste un signal purement serveur) — déjà noté comme lacune, toujours ouvert.
+- Anneau visuel au sol, recentrage du cercle après action, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
+
 ## Prochaines étapes
 
-1. **Déplacement borné par tour — diagnostiquer les bugs réseau de fin de session** : la validation serveur (approche C) est implémentée (clamp factorisé, `last_position` transmis par RPC, corrections ciblées sécurisées) mais des bugs réseau non diagnostiqués sont apparus lors des derniers tests à 2 instances. Priorité absolue de la prochaine session — reprendre avec des `print_debug` ciblés (`reset_move()`, `_on_turn_changed`, `force_position`) avant de considérer ce point de `GAMEPLAY.md` § Combat comme clos.
-2. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a deux sessions, ne plus le rouvrir comme "manque".
-3. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
-4. **Fondations réseau du prototype considérées closes** (mouvement, caméra 3ᵉ personne + tangage, autorité réseau, gestion d'erreur de connexion, nettoyage des déconnexions, state machine par joueur + rattrapage à la connexion — tous validés en réseau réel). Prochaine session : bascule vers du contenu de jeu (ordre de tour en premier) plutôt que de nouvelles briques réseau, sauf bug bloquant découvert en cours de route.
+1. **Bascule vers le contenu de jeu** : le déplacement borné par tour est désormais validé de bout en bout en réseau réel (anti-triche mis de côté, bug de synchronisation `current_combat_id` corrigé). Comme prévu depuis la session précédente : priorité au contenu de jeu (système d'action — attaque/synthèse — plutôt qu'à de nouvelles briques réseau).
+2. **Deux trous identifiés cette session, non bloquants pour l'instant** : rattrapage de `current_turn_combatant` pour une connexion tardive en pleine combat, et remise à zéro de l'état de combat (`current_combat_id`/`current_turn_combatant`) à la fin d'un combat — à traiter si/quand ces cas se présentent en test.
+3. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a plusieurs sessions, ne plus le rouvrir comme "manque".
+4. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
 
 ## Idées notées pour plus tard (hors scope immédiat)
 
