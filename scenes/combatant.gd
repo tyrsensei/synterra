@@ -7,6 +7,7 @@ var current_combat_id: int = -1
 var move_center: Vector3
 var move_radius: float
 var move_max_distance: float = 5.0
+var action_used: bool = false
 
 func _ready() -> void:
 	initiative = randi_range(0, 10)
@@ -15,3 +16,7 @@ func _ready() -> void:
 func reset_move():
 	move_center = global_position
 	move_radius = move_max_distance
+
+func set_available_move():
+	move_radius -= global_position.distance_to(move_center)
+	move_center = global_position

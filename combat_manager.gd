@@ -67,7 +67,8 @@ func request_action(combat_id: int, action: Action):
 		return
 	var remote_id:= multiplayer.get_remote_sender_id()
 	var combat: Combat = currents.get(combat_id)
-	if combat.get_current_combatant().get_meta("player_id") != remote_id:
+	var combatant := combat.get_current_combatant()
+	if combatant.get_meta("player_id") != remote_id:
 		return
 	
 	match action:
@@ -75,7 +76,12 @@ func request_action(combat_id: int, action: Action):
 			print_debug("end turn requested")
 			combat.next_turn()
 		Action.ATTACK_WEAPON:
-			pass
+			if combatant.action_used:
+				return
+			#TODO attack action
+			combatant.action_used = true
+			# Set new available distance
+			combatant.set_available_move()
 
 func get_combat(combat_id: int) -> Combat:
 	return currents[combat_id]

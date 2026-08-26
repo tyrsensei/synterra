@@ -19,3 +19,14 @@ func _on_end_turn_button_button_up() -> void:
 		player.current_combat_id,
 		CombatManager.Action.END_TURN
 	)
+
+
+func _on_attack_button_button_up() -> void:
+	print_debug("attack clicked")
+	var player := StateManager.get_player_from_id(multiplayer.get_unique_id())
+	CombatManager.rpc_id(
+		1,
+		"request_action",
+		player.current_combat_id,
+		CombatManager.Action.ATTACK_WEAPON
+	)

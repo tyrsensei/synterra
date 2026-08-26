@@ -976,9 +976,36 @@ func request_action(combat_id: int, action: Action):
 - **Piste ouverte, proposée par Julien** : centraliser `is_my_turn()` dans `CombatManager` plutôt que sur `Player`, à trancher en même temps que l'idée déjà notée de déplacer `current_combat_id`/`state` dans `StateManager` — même tension de fond (état de combat éclaté entre l'entité `Player`/`Combatant` et les managers qui le pilotent), à traiter ensemble plutôt qu'en deux refactors séparés.
 
 
+## Session — Action Attaque : recentrage du cercle de déplacement ✅
+
+**Objectif de session** : brancher l'effet du bouton d'action générique sur `Action.ATTACK_WEAPON` (recentrage du cercle plafonné sur les 2 phases de mouvement), suite logique du bouton fin de tour de la session précédente.
+
+**Décision de design — état manipulé côté manager plutôt que via une méthode dédiée sur `Combatant`** : `combat_manager.gd` lit/écrit directement les champs de `Combatant` (`action_used`, et indirectement `move_radius`/`move_center` via `set_available_move()`) depuis le `case Action.ATTACK_WEAPON` de `request_action`, plutôt que d'exposer une API riche sur `Combatant`. Cohérent avec la direction déjà actée de centraliser l'état de combat côté managers (`StateManager`/`CombatManager`) plutôt que sur `Player`/`Combatant` — toujours pas tranchée formellement, mais ce choix va dans le même sens et évite d'avoir à revenir dessus plus tard.
+
+```gdscript
+Action.ATTACK_WEAPON:
+    if combatant.action_used:
+        return
+    #TODO attack action
+    combatant.action_used = true
+    combatant.set_available_move()
+```
+
+`Combatant.set_available_move()` (nouveau) fait le calcul discuté : `move_radius -= global_position.distance_to(move_center)` avant de recentrer `move_center` sur la position actuelle — le budget de mouvement total sur les 2 phases reste plafonné au rayon initial du tour, au lieu de repartir de `move_max_distance`.
+
+**Garde ajoutée en cours de session, suite à une remarque en revue** : un premier passage posait bien `action_used = true` mais ne le lisait nulle part — cliquer plusieurs fois sur Attaque dans le même tour aurait donc rétréci le cercle à chaque clic (jusqu'à négatif). Corrigé en ajoutant `if combatant.action_used: return` en tête du `case`, sur le même principe que le check `get_meta("player_id") != remote_id` déjà présent juste au-dessus dans `request_action`. `action_used` est remis à `false` pour le combattant sortant dans `Combat.next_turn()`, avant l'incrément de `current_turn`.
+
+**UI** : bouton "Attack" ajouté dans `ui/game_ui.tscn`, même parent (`Combat Bar`, groupe `combat_ui`) et même patron de câblage que "End Turn" (`_on_attack_button_button_up` → `CombatManager.rpc_id(1, "request_action", ..., Action.ATTACK_WEAPON)`).
+
+**Testé cette session, en jeu** : clic Attaque recentre bien le cercle de déplacement ; un 2e clic dans le même tour est bien bloqué par `action_used`.
+
+**Pas fait / prochaine session :**
+- L'effet réel de l'attaque (ciblage, dégâts) : `Action.ATTACK_WEAPON` reste un `#TODO` au-delà du recentrage du cercle et de la consommation du slot d'action.
+- Boutons de combat toujours pas conditionnés à `is_my_turn()` (point déjà noté, volontairement pas traité ici).
+
 ## Prochaines étapes
 
-1. **Système d'action, suite** : brancher un vrai bouton d'action (recentrage du cercle + réduction de `move_radius` de la distance déjà parcourue), sur le même mécanisme `request_action`/`Action` que fin de tour.
+1. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
 2. **Conditionner les boutons de combat à `is_my_turn()`**, à traiter avec la décision d'architecture ci-dessous plutôt qu'en isolation.
 3. **Décision d'architecture à trancher** : centraliser l'état de combat par joueur (`current_combat_id`, `state`, et potentiellement `is_my_turn()`) dans les managers (`StateManager`/`CombatManager`) plutôt que sur `Player`/`Combatant` — cohérent avec `CombatManager.current_turn_combatant`, déjà centralisé de cette façon. Deux pistes notées en attente de cette décision commune.
 4. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
