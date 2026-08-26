@@ -1,0 +1,39 @@
+[gd_scene format=3 uid="uid://cu6blheccyprk"]
+
+[ext_resource type="Script" uid="uid://2w2f8g0pxw0b" path="res://ui/game_ui.gd" id="1_dcmab"]
+
+[node name="Game UI" type="Control" unique_id=152324710]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_dcmab")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=1141433993]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Control" type="Control" parent="VBoxContainer" unique_id=1410288386]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Combat Bar" type="HBoxContainer" parent="VBoxContainer" unique_id=1288524855 groups=["combat_ui"]]
+visible = false
+layout_mode = 2
+
+[node name="Control" type="Control" parent="VBoxContainer/Combat Bar" unique_id=426557910]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="End Turn Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1137898901]
+layout_mode = 2
+text = "End
+Turn"
+
+[connection signal="button_up" from="VBoxContainer/Combat Bar/End Turn Button" to="." method="_on_end_turn_button_button_up"]

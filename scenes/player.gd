@@ -10,6 +10,7 @@ class_name Player
 @onready var camera_pivot: Node3D = $CameraPivot
 @onready var camera_3d: Camera3D = $CameraPivot/SpringArm3D/Camera3D
 
+var mouse_move_enabled := false
 var mouse_move := Vector2.ZERO
 var state: StateManager.PlayerState = StateManager.PlayerState.EXPLORATION
 
@@ -21,11 +22,18 @@ func _ready() -> void:
 	super()
 	if is_multiplayer_authority():
 		camera_3d.make_current()
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		#Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion:
+	if event is InputEventMouseMotion and mouse_move_enabled:
 		mouse_move += event.relative
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		if event.is_pressed():
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			mouse_move_enabled = true
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			mouse_move_enabled = false
 
 func _physics_process(delta: float) -> void:
 	if not is_multiplayer_authority():

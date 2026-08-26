@@ -926,12 +926,65 @@ Corrigé des deux côtés :
 - `Player.collision_mask` : `3` → `7` (ajout du layer de `Enemy`) — le joueur est désormais physiquement bloqué par l'ennemi comme par un mur, le chevauchement ne se produit plus.
 - `Enemy.collision_mask` : `7` → `5` (retrait du layer de `Player`) — défense en profondeur : l'ennemi ignore désormais physiquement les joueurs, ne s'appuie plus que sur `PlayerDetector` (`Area3D`, layer/mask distincts, non affecté par ce changement) pour la détection de contact. Même en cas de léger chevauchement dû à un décalage réseau, l'ennemi ne réagirait plus en se déplaçant.
 
+## Session — Système d'action de combat : bouton fin de tour + fusion avec la future liste d'actions ✅ (fin de tour validé)
+
+**Objectif de session** : démarrer le système d'action (priorité actée à la session précédente), en commençant par un bouton de fin de tour pour le debug — le timer de tour ne laisse pas toujours le temps de tester — et un peu d'UI pour une action de combat encore vide de contenu.
+
+**Décision de design — le cercle de déplacement plafonné sur les 2 phases** : au lieu de repartir de `move_max_distance` à chaque action (ce qui donnerait un budget de mouvement double sur les 2 phases), l'action doit réduire `move_radius` de la distance déjà parcourue depuis le dernier recentrage avant de le recentrer — le total sur les 2 phases reste plafonné au rayon initial du tour. Pas encore implémenté (le bouton d'action générique reste à créer, voir "Pas fait" plus bas).
+
+**Décision de design — fusion "fin de tour" / "action"** : plutôt que deux mécanismes réseau séparés, fin de tour devient une action comme une autre (`Action.END_TURN`), aux côtés d'une future liste d'actions choisissables au clic/raccourci (`Action.ATTACK_WEAPON` pour l'instant, vide). Le transport RPC (validation "c'est bien ton tour" côté serveur, broadcast du résultat) est mutualisé ; seul l'effet exécuté diffère selon l'action (dispatch par `match`). Tranché explicitement : fin de tour reste **toujours** jouable, indépendamment du fait que l'action de combat ait déjà été consommée ce tour-ci — elle ne partage pas l'économie d'action.
+
+```gdscript
+enum Action {
+	END_TURN,
+	ATTACK_WEAPON,
+}
+
+@rpc("any_peer", "call_local")
+func request_action(combat_id: int, action: Action):
+	if not multiplayer.is_server():
+		return
+	var remote_id:= multiplayer.get_remote_sender_id()
+	var combat: Combat = currents.get(combat_id)
+	if combat.get_current_combatant().get_meta("player_id") != remote_id:
+		return
+
+	match action:
+		Action.END_TURN:
+			combat.next_turn()
+		Action.ATTACK_WEAPON:
+			pass
+```
+`request_end_turn` (existant) a été remplacée par cette `request_action` unique.
+
+**UI de combat créée** : `ui/game_ui.gd`/`ui/game_ui.tscn` (un `Control`, groupe `"combat_ui"` sur ses boutons), instanciée à la fois dans `levels/game.tscn` et `tests/test.tscn`. Affichage/masquage piloté par deux nouveaux signaux sur `StateManager` (`combat_started`/`combat_ended`), émis depuis `notify_state_changed` selon le nouvel état (`FIGHT`/`EXPLORATION`). L'ancien `levels/game_ui.gd` (qui ne gérait que le label de chargement) a été renommé `levels/game_messages.gd` pour libérer le nom.
+
+**Souris réactivée pour l'UI, caméra uniquement en rotation au clic droit maintenu** : nécessaire pour pouvoir cliquer sur les boutons — la souris était jusque-là capturée en permanence dès `_ready()`. `player.gd::_input()` bascule désormais `Input.mouse_mode` entre `MOUSE_MODE_CAPTURED`/`MOUSE_MODE_VISIBLE` sur l'appui/relâchement du clic droit, et n'accumule `mouse_move` (utilisé pour la rotation caméra) que pendant que le mode est capturé.
+
+**Deux bugs trouvés et corrigés en cours de session :**
+
+1. **`StateManager.get_player_from_id()` sans `return`** — piège classique GDScript : pas de retour implicite de la dernière expression d'une fonction, contrairement à certains langages. La fonction renvoyait donc toujours `null`, silencieusement, ce qui empêchait `notify_state_changed` d'assigner `current_combat_id`/`state` sur le joueur concerné — régression complète du blocage de mouvement par tour (plus aucun blocage, ni pendant ni hors tour, comme avant l'implémentation du tour par tour). Corrigé en ajoutant le `return` manquant.
+2. **`request_action` sans `call_local`** — cassait dès que l'appelant est le peer serveur lui-même : le bouton fait `CombatManager.rpc_id(1, "request_action", ...)` (cible le peer 1), qui échoue avec `RPC 'request_action' on yourself is not allowed by selected mode` quand l'appelant EST le peer 1. Pas qu'un artefact du test solo (`tests/test.tscn`, serveur seul) : l'hôte est un `Player` jouable comme un autre, donc ce même échec se serait aussi produit en vrai réseau à 2 instances le jour du tour de l'hôte. Corrigé en `@rpc("any_peer", "call_local")`.
+
+**Ajustement mineur** : `_start_combat_timer`/`_start_turn_timer` passés de 5.0 à 15.0 secondes chacun, pour laisser plus de marge en test/debug — valeur provisoire, à retravailler côté équilibrage plus tard.
+
+**Testé cette session** : bouton fin de tour fonctionnel, tour avancé côté serveur au clic.
+
+**Pas fait / prochaine session :**
+- Bouton d'action générique (celui qui doit recentrer le cercle en réduisant `move_radius` de la distance parcourue) : `Action.ATTACK_WEAPON` existe dans l'enum mais son dispatch est encore un `pass` vide, pas de bouton UI branché dessus.
+- Boutons non conditionnés à `is_my_turn()` : cliquer sur "fin de tour" hors de son tour lève actuellement une erreur côté serveur (`combat.get_current_combatant()` ne correspond pas à l'appelant) — laissé de côté volontairement, à traiter en désactivant/activant les boutons selon le tour.
+- **Piste ouverte, proposée par Julien** : centraliser `is_my_turn()` dans `CombatManager` plutôt que sur `Player`, à trancher en même temps que l'idée déjà notée de déplacer `current_combat_id`/`state` dans `StateManager` — même tension de fond (état de combat éclaté entre l'entité `Player`/`Combatant` et les managers qui le pilotent), à traiter ensemble plutôt qu'en deux refactors séparés.
+
+
 ## Prochaines étapes
 
-1. **Bascule vers le contenu de jeu** : le déplacement borné par tour est désormais validé de bout en bout en réseau réel (anti-triche mis de côté, bug de synchronisation `current_combat_id` corrigé). Comme prévu depuis la session précédente : priorité au contenu de jeu (système d'action — attaque/synthèse — plutôt qu'à de nouvelles briques réseau).
-2. **Deux trous identifiés cette session, non bloquants pour l'instant** : rattrapage de `current_turn_combatant` pour une connexion tardive en pleine combat, et remise à zéro de l'état de combat (`current_combat_id`/`current_turn_combatant`) à la fin d'un combat — à traiter si/quand ces cas se présentent en test.
-3. **Validation croisée test/prod** : la scène de test (`tests/test.tscn`) ne couvre que le rôle serveur pour l'instant (`skip_scene_loading = true` + `create_server()` direct) — **usage volontaire et assumé**, pas une lacune : `tests/test.tscn` sert au test local (rôle serveur uniquement), le menu principal reste le chemin normal pour tester le mode connecté (client + serveur). Point clarifié il y a plusieurs sessions, ne plus le rouvrir comme "manque".
-4. Étoffer `tests/test.tscn` au fil des prochaines features (combat, particules) plutôt que de créer une nouvelle scène de test à chaque fois.
+1. **Système d'action, suite** : brancher un vrai bouton d'action (recentrage du cercle + réduction de `move_radius` de la distance déjà parcourue), sur le même mécanisme `request_action`/`Action` que fin de tour.
+2. **Conditionner les boutons de combat à `is_my_turn()`**, à traiter avec la décision d'architecture ci-dessous plutôt qu'en isolation.
+3. **Décision d'architecture à trancher** : centraliser l'état de combat par joueur (`current_combat_id`, `state`, et potentiellement `is_my_turn()`) dans les managers (`StateManager`/`CombatManager`) plutôt que sur `Player`/`Combatant` — cohérent avec `CombatManager.current_turn_combatant`, déjà centralisé de cette façon. Deux pistes notées en attente de cette décision commune.
+4. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
+5. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
+6. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
+
 
 ## Idées notées pour plus tard (hors scope immédiat)
 

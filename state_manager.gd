@@ -3,6 +3,9 @@ extends Node
 enum PlayerState {EXPLORATION, FIGHT, BUILD}
 enum CombatState {PREP, ONGOING, END}
 
+signal combat_started
+signal combat_ended
+
 func _ready() -> void:
 	NetworkManager.client_connected.connect(get_states)
 	
@@ -13,12 +16,15 @@ func request_state_change(new_state: PlayerState, combat_id: int = -1):
 
 @rpc("authority", "call_local")
 func notify_state_changed(player_id: int, new_state: PlayerState, combat_id: int = -1):
-	var player: Player = get_tree().current_scene.get_node_or_null(
-		str("Players/Player-", player_id)
-	)
+	var player: Player = get_player_from_id(player_id)
 	if player:
 		player.state = new_state
 		player.current_combat_id = combat_id
+		match new_state:
+			PlayerState.FIGHT:
+				combat_started.emit()
+			PlayerState.EXPLORATION:
+				combat_ended.emit()
 
 func get_states(client_id: int):
 	var players = get_tree().current_scene.get_node("Players").get_children()
@@ -30,3 +36,8 @@ func get_states(client_id: int):
 			player.state,
 			player.current_combat_id
 		)
+
+func get_player_from_id(player_id: int) -> Player:
+	return get_tree().current_scene.get_node_or_null(
+		str("Players/Player-", player_id)
+	)

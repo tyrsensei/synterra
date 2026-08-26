@@ -1,5 +1,9 @@
 extends Node
 
+enum Action {
+	END_TURN,
+	ATTACK_WEAPON,
+}
 var currents: Dictionary[int, Combat] = {}
 var current_turn_combatant: Dictionary[int, Combatant] = {}
 var _next_combat_id := 0
@@ -43,7 +47,7 @@ func _on_turn_changed(combatant: Combatant, combat: Combat):
 
 func _start_turn_timer(combat: Combat):
 	var saved_turn:= combat.current_turn
-	await get_tree().create_timer(5.0).timeout
+	await get_tree().create_timer(15.0).timeout
 	if combat.current_turn == saved_turn:
 		combat.next_turn()
 
@@ -57,8 +61,8 @@ func notify_turn_changed(combat_id: int, combatant_path: NodePath):
 	combatant.reset_move()
 	
 
-@rpc("any_peer")
-func request_end_turn(combat_id: int):
+@rpc("any_peer", "call_local")
+func request_action(combat_id: int, action: Action):
 	if not multiplayer.is_server():
 		return
 	var remote_id:= multiplayer.get_remote_sender_id()
@@ -66,7 +70,12 @@ func request_end_turn(combat_id: int):
 	if combat.get_current_combatant().get_meta("player_id") != remote_id:
 		return
 	
-	combat.next_turn()
+	match action:
+		Action.END_TURN:
+			print_debug("end turn requested")
+			combat.next_turn()
+		Action.ATTACK_WEAPON:
+			pass
 
 func get_combat(combat_id: int) -> Combat:
 	return currents[combat_id]

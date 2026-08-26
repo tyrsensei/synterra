@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://d1ngefdwyfxf4" path="res://tests/test.gd" id="1_yggfj"]
 [ext_resource type="PackedScene" uid="uid://d14cwon0u5xsk" path="res://scenes/enemy.tscn" id="2_eig8f"]
+[ext_resource type="PackedScene" uid="uid://cu6blheccyprk" path="res://ui/game_ui.tscn" id="3_7517i"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_4nir5"]
 size = Vector2(10, 10)
@@ -39,3 +40,5 @@ camera_attributes = SubResource("CameraAttributesPractical_n6f5g")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=727044004]
 transform = Transform3D(1, 0, 0, 0, 0.48781052, 0.87294954, 0, -0.87294954, 0.48781052, 0, 3.5593963, 0)
+
+[node name="Game UI" parent="." unique_id=152324710 instance=ExtResource("3_7517i")]
