@@ -1003,14 +1003,60 @@ Action.ATTACK_WEAPON:
 - L'effet réel de l'attaque (ciblage, dégâts) : `Action.ATTACK_WEAPON` reste un `#TODO` au-delà du recentrage du cercle et de la consommation du slot d'action.
 - Boutons de combat toujours pas conditionnés à `is_my_turn()` (point déjà noté, volontairement pas traité ici).
 
+## Session — Centraliser `is_my_turn()` + brancher les boutons de combat dessus + fix focus clavier
+
+**Objectif de session** : traiter le point laissé ouvert la session précédente — conditionner les boutons de combat à `is_my_turn()`, en tranchant d'abord la question d'architecture en attente (où vit l'état de combat : sur `Player`/`Combatant` ou centralisé dans les managers).
+
+**Décision d'architecture tranchée — centraliser la *requête*, pas le *stockage* :** `current_combat_id`/`state` restent des champs sur `Player`/`Combatant` (cohérent avec le pattern déjà en place pour `position`/`rotation`/`initiative` — état synchronisé par RPC, porté par le node). Seule la fonction qui répond "à qui le tour" migre vers `CombatManager`, là où `current_turn_combatant` (la source de vérité du tour) vit déjà — évite de dupliquer cette logique entre deux fichiers sans casser la convention existante pour le reste de l'état combat. Renommée `is_player_turn` au passage (plus appelée en interne sur `self`, mais depuis l'extérieur avec un joueur explicite).
+
+**Deux bugs trouvés et corrigés pendant l'écriture de `is_player_turn` :**
+1. **Comparaison de mauvais type** : `current_turn_combatant.get(...)` stocke des `Combatant`, la première version comparait à `player.get_meta("player_id")` (un `int`) — ne pouvait jamais être vrai. Corrigé en comparant au node `player` directement (même principe que l'ancienne version sur `Player`, qui comparait `== self`).
+2. **`null` non géré** : `StateManager.get_player_from_id()` peut renvoyer `null` (`get_node_or_null`) — accès non protégé plantait dessus. Corrigé avec un `if not player: return true` (fail-open, cohérent avec le reste du projet qui n'a pas d'anti-triche).
+
+**Piège de performance détecté par Julien avant même le test — signature à revoir :** la première version prenait un `player_id: int` et le résolvait en interne via `StateManager.get_player_from_id()` (`get_node_or_null` sur un chemin construit par concaténation de string). Une fois branchée dans `player.gd::_physics_process()`, ça tourne ~60 fois/seconde pour retrouver un node que l'appelant a déjà sous la main. Corrigé en faisant prendre le node `Player`/`Combatant` directement en paramètre plutôt qu'un id — les deux appelants (`player.gd` avec `self`, `game_ui.gd` qui résout déjà son joueur local pour construire ses RPC) le fournissent gratuitement. Remet le coût au niveau de l'ancienne méthode sur `Player` (un champ + un `Dictionary.get()`), juste relocalisée.
+
+**Piège de signal identifié avant implémentation — `Combat.turn_changed` vs RPC `notify_turn_changed` :** `Combat` est un `RefCounted`, instancié uniquement côté serveur (`CombatManager.handle_contact()`, gardée par `multiplayer.is_server()`) — aucune instance n'existe jamais sur un client, donc son signal `turn_changed` ne peut jamais atteindre l'UI d'un client distant (aurait fonctionné en test solo hôte, jamais en réseau réel — même famille de piège que les signaux de scène déjà rencontrés en début de projet). Le signal UI (`CombatManager.new_turn_received`) est donc émis depuis `notify_turn_changed`, le RPC `@rpc("authority", "call_local")` déjà garanti de tourner identiquement sur toutes les machines. Commentaire ajouté en tête de `resources/combat.gd` pour documenter cette limite (`# Exists only on server and is not replicated`).
+
+```gdscript
+# combat_manager.gd
+signal new_turn_received
+
+@rpc("authority", "call_local")
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
+	var combatant: Combatant = get_node_or_null(combatant_path)
+	if combatant == null:
+		return
+	current_turn_combatant[combat_id] = combatant
+	combatant.reset_move()
+	new_turn_received.emit()
+
+func is_player_turn(player: Player) -> bool:
+	if player.current_combat_id == -1:
+		return true
+	return current_turn_combatant.get(player.current_combat_id) == player
+```
+
+**UI branchée (`game_ui.gd`)** : écoute `CombatManager.new_turn_received` en plus de `StateManager.combat_started`/`combat_ended` déjà en place, résout le joueur local et active/désactive le groupe `combat_ui` via `is_player_turn()`. `game_ui.tscn` ajustée en cohérence : le groupe `combat_ui` est passé du conteneur (`HBoxContainer`) directement aux enfants (`Control`, `Attack Button`, `End Turn Button`), avec `disabled = true` et `visible = false` par défaut, pour que l'état initial (avant tout signal) soit cohérent avec un combat non commencé.
+
+**Bug distinct trouvé en test — focus clavier retenu par les boutons après clic :** un clic sur un bouton lui laisse le focus clavier ; les flèches suivantes étaient alors interceptées par la navigation GUI intégrée de Godot (déplacer le focus entre `Control`) au lieu d'atteindre le mouvement du perso. Cause : le mouvement était lu via `Input.get_vector("ui_left", "ui_right", "ui_down", "ui_up")` — les actions `ui_*` sont réservées par Godot pour cette navigation GUI, donc tout `Control` focusable de la scène entre en concurrence avec le perso pour les mêmes touches.
+
+Deux options comparées : `focus_mode = FOCUS_NONE` ciblé sur les boutons (rapide, local) vs actions de mouvement dédiées, découplées de `ui_*` (plus de travail, mais ferme le sujet pour toute future UI). **Option retenue : actions dédiées.** Nouvelles actions `move_up`/`move_down`/`move_left`/`move_right` (`project.godot`), remappées sur les touches W/A/S/D en position physique (`physical_keycode`, indépendant du layout clavier — donc ZQSD affiché en AZERTY). `player.gd` n'utilise plus aucune action `ui_*` pour le mouvement.
+
+**Non confirmé testé à la fin de cette session** : le fix du focus clavier a été appliqué mais pas encore validé en jeu dans l'échange — à vérifier en priorité à la prochaine reprise avant d'enchaîner dessus.
+
+**Pas fait / prochaine session :**
+- Confirmer en jeu que le fix focus (actions `move_*` dédiées) résout bien le blocage, y compris en réseau réel à 2 instances.
+- L'effet réel de l'attaque (ciblage, dégâts) : toujours un `#TODO`.
+- Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants).
+- Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés.
+
 ## Prochaines étapes
 
-1. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
-2. **Conditionner les boutons de combat à `is_my_turn()`**, à traiter avec la décision d'architecture ci-dessous plutôt qu'en isolation.
-3. **Décision d'architecture à trancher** : centraliser l'état de combat par joueur (`current_combat_id`, `state`, et potentiellement `is_my_turn()`) dans les managers (`StateManager`/`CombatManager`) plutôt que sur `Player`/`Combatant` — cohérent avec `CombatManager.current_turn_combatant`, déjà centralisé de cette façon. Deux pistes notées en attente de cette décision commune.
-4. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
-5. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
-6. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
+1. **Valider en jeu le fix du focus clavier** (actions `move_*` dédiées, plus de conflit avec `ui_*`) — priorité avant d'enchaîner, pas encore confirmé testé.
+2. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
+3. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
+4. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
+5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
