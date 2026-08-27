@@ -23,20 +23,24 @@ grow_vertical = 2
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Combat Bar" type="HBoxContainer" parent="VBoxContainer" unique_id=1288524855 groups=["combat_ui"]]
-visible = false
+[node name="Combat Bar" type="HBoxContainer" parent="VBoxContainer" unique_id=1288524855]
 layout_mode = 2
 
-[node name="Control" type="Control" parent="VBoxContainer/Combat Bar" unique_id=426557910]
+[node name="Control" type="Control" parent="VBoxContainer/Combat Bar" unique_id=426557910 groups=["combat_ui"]]
+visible = false
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Attack Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1840985094]
+[node name="Attack Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1840985094 groups=["combat_ui"]]
+visible = false
 layout_mode = 2
+disabled = true
 text = "Attack"
 
-[node name="End Turn Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1137898901]
+[node name="End Turn Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1137898901 groups=["combat_ui"]]
+visible = false
 layout_mode = 2
+disabled = true
 text = "End
 Turn"
 

@@ -8,6 +8,8 @@ var currents: Dictionary[int, Combat] = {}
 var current_turn_combatant: Dictionary[int, Combatant] = {}
 var _next_combat_id := 0
 
+signal new_turn_received
+
 # Only ran by server
 func handle_contact(player: Player, enemy: Enemy):
 	# Player can't join 2 combats
@@ -59,6 +61,7 @@ func notify_turn_changed(combat_id: int, combatant_path: NodePath):
 		return
 	current_turn_combatant[combat_id] = combatant
 	combatant.reset_move()
+	new_turn_received.emit()
 	
 
 @rpc("any_peer", "call_local")
@@ -85,3 +88,11 @@ func request_action(combat_id: int, action: Action):
 
 func get_combat(combat_id: int) -> Combat:
 	return currents[combat_id]
+
+func is_player_turn(player: Player) -> bool:
+	if player.current_combat_id == -1:
+		return true
+	
+	return (
+		current_turn_combatant.get(player.current_combat_id) == player
+	)

@@ -46,10 +46,10 @@ func _physics_process(delta: float) -> void:
 	mouse_move = Vector2.ZERO
 	
 	# Don't move if in combat and not my turn
-	if not is_my_turn():
+	if not CombatManager.is_player_turn(self):
 		return
 	
-	var direction_input:= Input.get_vector("ui_left", "ui_right", "ui_down", "ui_up") * speed
+	var direction_input:= Input.get_vector("move_left", "move_right", "move_down", "move_up") * speed
 	var move_direction:Vector3 = (
 		direction_input.x * self.transform.basis.x
 	) + (
@@ -74,11 +74,3 @@ func _physics_process(delta: float) -> void:
 			velocity.z = flat_velocity.y
 	
 	move_and_slide()
-
-func is_my_turn() -> bool:
-	if current_combat_id == -1:
-		return true
-	
-	return (
-		CombatManager.current_turn_combatant.get(current_combat_id) == self
-	)

@@ -1,3 +1,4 @@
+# Exists only on server and is not replicated
 extends RefCounted
 
 class_name Combat
