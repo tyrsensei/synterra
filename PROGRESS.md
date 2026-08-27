@@ -984,11 +984,11 @@ func request_action(combat_id: int, action: Action):
 
 ```gdscript
 Action.ATTACK_WEAPON:
-    if combatant.action_used:
-        return
-    #TODO attack action
-    combatant.action_used = true
-    combatant.set_available_move()
+	if combatant.action_used:
+		return
+	#TODO attack action
+	combatant.action_used = true
+	combatant.set_available_move()
 ```
 
 `Combatant.set_available_move()` (nouveau) fait le calcul discuté : `move_radius -= global_position.distance_to(move_center)` avant de recentrer `move_center` sur la position actuelle — le budget de mouvement total sur les 2 phases reste plafonné au rayon initial du tour, au lieu de repartir de `move_max_distance`.
