@@ -74,3 +74,10 @@ func _physics_process(delta: float) -> void:
 			velocity.z = flat_velocity.y
 	
 	move_and_slide()
+
+@rpc("any_peer", "call_local")
+func force_position(pos: Vector3):
+	if multiplayer.get_remote_sender_id() != 1:
+		return
+	global_position = pos
+	velocity = Vector3.ZERO

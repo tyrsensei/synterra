@@ -78,7 +78,9 @@ func request_action(combat_id: int, action: Action):
 		var player := StateManager.get_player_from_id(remote_id)
 		if not player or player.current_combat_id != -1:
 			return
+		var join_pos := combat.get_join_position()
 		combat.add_participant(player)
+		player.rpc_id(remote_id, "force_position", join_pos)
 		_notify_joined(player, combat_id, combat.phase)
 		return
 	

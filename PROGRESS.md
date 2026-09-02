@@ -1086,24 +1086,46 @@ Corrigé en sortant `JOIN_COMBAT` du bloc générique "c'est ton tour" (résolut
 
 Le fix initial de "ne notifier que les combats encore en `PREP`" relisait `CombatManager.currents.get(combat_id)` **à l'intérieur de `notify_state_changed`**, une RPC `call_local` qui s'exécute identiquement sur toutes les machines. Or `CombatManager.currents` n'est peuplé que côté serveur (`resources/combat.gd` porte d'ailleurs le commentaire `# Exists only on server and is not replicated`) — sur un client, la lecture renvoie toujours `null`, donc `new_combat_available` ne s'émettait plus jamais côté client (fonctionnait par accident en test solo/host, où `currents` est bien peuplé). Corrigé en transmettant la phase en paramètre de la RPC (`combat_phase`, calculée côté serveur au moment de l'appel) plutôt qu'en la re-dérivant localement sur chaque machine — touche `notify_state_changed`, `get_states()`, `CombatManager._notify_joined()` et ses deux appelants (`handle_contact`, dont la variable `combat`/`enemy_combat` a dû être hissée hors du `if`/`else` pour rester accessible après ; branche `JOIN_COMBAT` de `request_action`).
 
-**Testé cette session** : flow de join validé par Julien ("ça a l'air de fonctionner") — à reconfirmer précisément côté client non-host, puisque c'est justement le cas que le bug `combat_phase` ci-dessus ne pouvait pas révéler en test solo/host.
+**Testé cette session, en réseau réel à 2+ instances, confirmé côté client non-host ✅** : flow de join validé après le fix `combat_phase` — la notif "Join" apparaît bien côté client, pas seulement chez l'host. Referme le point de vigilance laissé en suspens plus haut.
 
 **Pas fait / prochaine session :**
 - Téléportation/repositionnement du joueur qui rejoint à distance (décision actée : autour des participants déjà en combat) — le join fonctionne (ajout aux `turn_order`), mais aucun déplacement n'est encore appliqué.
-- Confirmer explicitement en réseau réel à 2+ instances que la notif "Join" apparaît bien côté client non-host après le fix `combat_phase` (le point qui a motivé ce fix).
 - Finding de revue de code laissé ouvert : `JOIN_COMBAT` géré en early-return spécial dans `request_action` plutôt que via une RPC dédiée — question d'architecture, pas un bug, à reprendre si besoin.
 - L'effet réel de l'action Attaque (ciblage, dégâts) : toujours un `#TODO`, reporté depuis plusieurs sessions.
 - Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants, déjà notés).
 - Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés.
 
+## Session — Téléportation du joueur qui rejoint à distance ✅
+
+**Objectif de session** : implémenter le point resté ouvert de la session précédente — déplacer physiquement un joueur qui rejoint un combat via le bouton "Join" (contrairement au contact direct avec l'ennemi, il peut être n'importe où sur la carte).
+
+**`get_join_position()` (`resources/combat.gd`)** : moyenne des positions des alliés déjà en combat (filtrage `if combatant is not Player: continue` — l'ennemi n'entre pas dans le calcul, décision prise par Julien en cours de session, corrige un premier jet qui incluait l'ennemi et tirait le point d'arrivée vers lui plutôt que vers le groupe). Appelée depuis `request_action` (branche `JOIN_COMBAT`) **avant** `combat.add_participant(player)`, pour ne pas s'inclure soi-même dans sa propre moyenne d'arrivée.
+
+**`force_position` (`scenes/player.gd`)** : RPC ciblée qui demande au client concerné de fixer sa propre position (le `MultiplayerSynchronizer` de `Player` reste en autorité client, le serveur ne peut pas écrire `global_position` directement sur sa copie du nœud — même contrainte que l'ancien `force_position` de l'anti-triche, retiré puis réintroduit ici pour un usage différent). Nommée volontairement `force_position` et pas `set_position` : `Node3D` porte déjà une méthode native `set_position()` (accesseur de la propriété `position`), une fonction de script portant ce nom risquerait de l'écraser, y compris pour des écritures internes du moteur. `velocity` remis à zéro à la téléportation (gap identifié à l'époque de l'anti-triche, jamais fermé — fermé ici).
+
+**Bug rencontré et corrigé — crash au premier test réseau :**
+```
+RPC 'force_position' on yourself is not allowed by selected mode.
+```
+Même cause que le bug déjà rencontré sur `request_action` (session "Système d'action de combat") : quand l'host clique lui-même sur "Join", `rpc_id(1, ...)` cible le peer 1 en étant appelé depuis le peer 1 — sans `call_local`, Godot refuse. Corrigé en `@rpc("any_peer", "call_local")`, comme pour `request_action`. Le garde `multiplayer.get_remote_sender_id() != 1` reste fiable dans ce cas (déjà vérifié sur `request_action` en réseau réel côté host).
+
+**Bug rencontré et corrigé — le joueur qui rejoint atterrissait exactement sur l'unique allié déjà présent :**
+
+Avec un seul allié en combat, `sum / num_players` avec `num_players == 1` renvoie ce point lui-même — pas un bug d'arrondi, un cas limite (pas de marge du tout au premier jet). Corrigé en ajoutant une marge (`JOIN_MARGIN := 2.0`, `const` sur `Combat`) dans une direction aléatoire autour du centre calculé — évite aussi que deux joueurs qui rejoignent coup sur coup se retrouvent superposés entre eux. Prépare aussi le terrain pour une fonctionnalité prévue plus tard : laisser les joueurs se repositionner légèrement pendant la phase `PREP` avant le vrai début du combat.
+
+**Testé cette session, en réseau réel à 2 joueurs ✅** : téléportation confirmée fonctionnelle après les deux corrections ci-dessus.
+
+**Pas fait / prochaine session :**
+- Repositionnement des joueurs pendant `PREP` (mentionné comme suite logique de la marge de join, pas encore posé).
+- `JOIN_MARGIN` fixe pour l'instant — à ajuster/exposer si besoin une fois plus de tests en conditions réelles.
+
 ## Prochaines étapes
 
-1. **Confirmer en réseau réel à 2+ instances que la notif "Join" apparaît côté client non-host**, suite au fix du bug `combat_phase`/`CombatManager.currents` local au serveur (session "Notification de combat") — priorité avant d'enchaîner.
-2. **Téléportation/repositionnement du joueur qui rejoint à distance** (autour des participants déjà en combat, décision actée mais pas codée) — suite logique du flow de join.
-3. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
-4. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
-5. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
-6. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
+1. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
+2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
+3. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
+4. Repositionnement des joueurs pendant la phase `PREP` — idée notée cette session, pas encore de plan concret.
+5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
