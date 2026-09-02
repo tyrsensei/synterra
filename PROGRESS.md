@@ -1050,13 +1050,60 @@ Deux options comparées : `focus_mode = FOCUS_NONE` ciblé sur les boutons (rapi
 - Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants).
 - Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés.
 
+## Session — Notification de combat (rejoindre à distance) + revue de code
+
+**Objectif de session** : permettre à un joueur non engagé de rejoindre un combat en `PREP` sans forcément marcher dans la zone de contact de l'ennemi — via une notification "Join" — et corriger au passage un bug d'affichage repéré en testant le flow existant (contact direct).
+
+**Décisions de design actées avant implémentation :**
+- **Déclencheur de la notification : global (broadcast)**, pas basé sur la proximité. N'importe quel combat en `PREP` notifie tous les joueurs connectés, où qu'ils soient sur la carte — alternative écartée : nouvelle `Area3D` de détection plus large que le `PlayerDetector` existant de l'ennemi.
+- **Position du joueur qui rejoint à distance : autour des participants déjà en combat** (calcul dynamique, pas un point fixe sur l'ennemi) — alternative écartée : marqueur `JoinPoint` fixe sur `enemy.tscn`. **Non implémenté cette session** (voir "Pas fait" plus bas) : le join fonctionne aujourd'hui (le joueur rejoint la liste des participants), mais rien ne le téléporte — un joueur loin de l'ennemi rejoint sans bouger.
+- **Principe retenu** : l'état d'un combat (`player.state`/`current_combat_id`) doit être connu de tous les joueurs sans filtre (déjà le cas), mais les *actions*/réactions UI ne doivent se déclencher que pour le joueur concerné — distinction qui a guidé les deux bugs corrigés ci-dessous.
+
+**Bug trouvé et corrigé — UI de combat affichée directement chez l'host au lieu du message de join :**
+
+`notify_state_changed` (RPC broadcast `call_local`) émettait `combat_started`/`combat_ended` sans filtrer *pour qui* le changement d'état avait lieu — dès qu'un client passait en `FIGHT`, tous les autres clients (dont l'host) recevaient aussi le signal et affichaient leur propre UI de combat. Corrigé en scindant la fonction : les champs (`player.state`, `player.current_combat_id`) restent assignés sans filtre pour tout le monde (nécessaire pour `is_player_turn()` etc.), seule l'émission des signaux UI est restreinte à `player_id == multiplayer.get_unique_id()`.
+
+**Implémentation du join — nouvelle action `JOIN_COMBAT` dans `request_action`** (pas une RPC séparée) : cohérent avec la fusion déjà actée en session précédente (fin de tour/attaque comme actions du même enum). UI : nouveau groupe `combat_prep_ui` (label + bouton "Join") dans `game_ui.tscn`, notifié via `StateManager.new_combat_available` (nouveau signal, émis depuis `notify_state_changed` quand `combat_id != -1`).
+
+**Bug trouvé et corrigé — le join ne faisait rien de visible :**
+
+Deux causes cumulées dans la branche `JOIN_COMBAT` de `request_action` :
+1. La résolution du combattant appelant réutilisait `combat.get_current_combatant()` (pensée pour "c'est ton tour ?", `END_TURN`/`ATTACK_WEAPON`) — pendant `PREP`, `current_turn` vaut encore `-1`, et l'indexation négative de GDScript (`turn_order[-1]`) renvoie silencieusement le dernier combattant déjà présent, pas `null` — le check d'identité comparait donc le mauvais joueur.
+2. Aucun `StateManager.rpc("notify_state_changed", ...)` n'était appelé après `combat.add_participant()` — le joueur qui rejoint (et tout le monde) n'était jamais informé que ça avait fonctionné.
+
+Corrigé en sortant `JOIN_COMBAT` du bloc générique "c'est ton tour" (résolution directe du joueur via `remote_id`, pas de dépendance à `get_current_combatant()`) et en ajoutant le broadcast manquant.
+
+**Revue de code (`/code-review`, high effort, 8 angles) menée sur ce diff — 9 findings, 8 corrigés par Julien** (le périmètre d'écriture de Claude sur ce projet exclut les fichiers `.gd`/`.tscn`, voir `CLAUDE.md` — correctifs donnés en snippets, appliqués manuellement) :
+- Null-guard sur `combat` (`currents.get()` peut renvoyer `null`) dans `request_action`
+- Garde `combat.phase != ONGOING` ajoutée avant la résolution `get_current_combatant()` — ferme aussi l'exploit du point 1 ci-dessus pour `END_TURN`/`ATTACK_WEAPON` (un joueur pouvait agir hors tour pendant `PREP`, avec un risque de corruption de l'ordre de tour au démarrage réel du combat, cf. indexation négative)
+- `combat_prep_ui` désormais caché dans `_on_combat_ended` (oublié initialement, ne l'était que dans `_on_combat_started`)
+- `pending_combat_id` : null-check sur le joueur local + anti-écrasement (une deuxième notif ne clobber plus une invitation en attente)
+- RPC morte `notify_combat_available` (déclarée, jamais appelée) supprimée
+- Séquence dupliquée "add_participant + broadcast" (présente à la fois dans `handle_contact` et la branche `JOIN_COMBAT`) factorisée dans `combat_manager.gd::_notify_joined()`
+- 1 finding laissé de côté volontairement (architecture : `JOIN_COMBAT` en early-return dans `request_action` plutôt qu'une RPC dédiée — observation de design, pas un bug, à retrancher plus tard si besoin)
+
+**Bug trouvé en vérifiant le correctif de la notif filtrée par phase — piège de données locales au serveur, même famille que le bug `current_combat` de la session "Suppression de l'anti-triche" :**
+
+Le fix initial de "ne notifier que les combats encore en `PREP`" relisait `CombatManager.currents.get(combat_id)` **à l'intérieur de `notify_state_changed`**, une RPC `call_local` qui s'exécute identiquement sur toutes les machines. Or `CombatManager.currents` n'est peuplé que côté serveur (`resources/combat.gd` porte d'ailleurs le commentaire `# Exists only on server and is not replicated`) — sur un client, la lecture renvoie toujours `null`, donc `new_combat_available` ne s'émettait plus jamais côté client (fonctionnait par accident en test solo/host, où `currents` est bien peuplé). Corrigé en transmettant la phase en paramètre de la RPC (`combat_phase`, calculée côté serveur au moment de l'appel) plutôt qu'en la re-dérivant localement sur chaque machine — touche `notify_state_changed`, `get_states()`, `CombatManager._notify_joined()` et ses deux appelants (`handle_contact`, dont la variable `combat`/`enemy_combat` a dû être hissée hors du `if`/`else` pour rester accessible après ; branche `JOIN_COMBAT` de `request_action`).
+
+**Testé cette session** : flow de join validé par Julien ("ça a l'air de fonctionner") — à reconfirmer précisément côté client non-host, puisque c'est justement le cas que le bug `combat_phase` ci-dessus ne pouvait pas révéler en test solo/host.
+
+**Pas fait / prochaine session :**
+- Téléportation/repositionnement du joueur qui rejoint à distance (décision actée : autour des participants déjà en combat) — le join fonctionne (ajout aux `turn_order`), mais aucun déplacement n'est encore appliqué.
+- Confirmer explicitement en réseau réel à 2+ instances que la notif "Join" apparaît bien côté client non-host après le fix `combat_phase` (le point qui a motivé ce fix).
+- Finding de revue de code laissé ouvert : `JOIN_COMBAT` géré en early-return spécial dans `request_action` plutôt que via une RPC dédiée — question d'architecture, pas un bug, à reprendre si besoin.
+- L'effet réel de l'action Attaque (ciblage, dégâts) : toujours un `#TODO`, reporté depuis plusieurs sessions.
+- Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants, déjà notés).
+- Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés.
+
 ## Prochaines étapes
 
-1. **Valider en jeu le fix du focus clavier** (actions `move_*` dédiées, plus de conflit avec `ui_*`) — priorité avant d'enchaîner, pas encore confirmé testé.
-2. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
-3. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
-4. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
-5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
+1. **Confirmer en réseau réel à 2+ instances que la notif "Join" apparaît côté client non-host**, suite au fix du bug `combat_phase`/`CombatManager.currents` local au serveur (session "Notification de combat") — priorité avant d'enchaîner.
+2. **Téléportation/repositionnement du joueur qui rejoint à distance** (autour des participants déjà en combat, décision actée mais pas codée) — suite logique du flow de join.
+3. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
+4. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
+5. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
+6. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)

@@ -1,6 +1,7 @@
 extends Node
 
 enum Action {
+	JOIN_COMBAT,
 	END_TURN,
 	ATTACK_WEAPON,
 }
@@ -16,13 +17,14 @@ func handle_contact(player: Player, enemy: Enemy):
 	if player.current_combat_id != -1:
 		return
 	
+	var combat: Combat
 	if enemy.current_combat_id != -1:
-		var enemy_combat = get_combat(enemy.current_combat_id)
-		if enemy_combat.phase != StateManager.CombatState.PREP:
+		combat = get_combat(enemy.current_combat_id)
+		if combat.phase != StateManager.CombatState.PREP:
 			return
-		enemy_combat.add_participant(player)
+		combat.add_participant(player)
 	else:
-		var combat = Combat.new()
+		combat = Combat.new()
 		combat.turn_changed.connect(_on_turn_changed.bind(combat))
 		combat.combat_id = _next_combat_id
 		_next_combat_id+=1
@@ -31,15 +33,10 @@ func handle_contact(player: Player, enemy: Enemy):
 		currents.set(combat.combat_id, combat)
 		_start_combat_timer(combat)
 	
-	StateManager.rpc(
-		"notify_state_changed",
-		player.get_meta("player_id"),
-		StateManager.PlayerState.FIGHT,
-		player.current_combat_id
-	)
+	_notify_joined(player, player.current_combat_id, combat.phase)
 
 func _start_combat_timer(combat: Combat):
-	await get_tree().create_timer(5.0).timeout
+	await get_tree().create_timer(30.0).timeout
 	if combat.phase == StateManager.CombatState.PREP:
 		combat.start()
 
@@ -70,10 +67,30 @@ func request_action(combat_id: int, action: Action):
 		return
 	var remote_id:= multiplayer.get_remote_sender_id()
 	var combat: Combat = currents.get(combat_id)
-	var combatant := combat.get_current_combatant()
-	if combatant.get_meta("player_id") != remote_id:
+	if not combat:
 		return
 	
+	# Join (no started combat)
+	if action == Action.JOIN_COMBAT:
+		print_debug("join combat requested")
+		if combat.phase != StateManager.CombatState.PREP:
+			return
+		var player := StateManager.get_player_from_id(remote_id)
+		if not player or player.current_combat_id != -1:
+			return
+		combat.add_participant(player)
+		_notify_joined(player, combat_id, combat.phase)
+		return
+	
+	# In combat
+	if combat.phase != StateManager.CombatState.ONGOING:
+		return
+	var combatant := combat.get_current_combatant()
+	if not combatant:
+		combatant = StateManager.get_player_from_id(remote_id)
+	if combatant.get_meta("player_id") != remote_id:
+		return
+
 	match action:
 		Action.END_TURN:
 			print_debug("end turn requested")
@@ -95,4 +112,13 @@ func is_player_turn(player: Player) -> bool:
 	
 	return (
 		current_turn_combatant.get(player.current_combat_id) == player
+	)
+
+func _notify_joined(player: Player, combat_id: int, combat_phase: StateManager.CombatState) -> void:
+	StateManager.rpc(
+		"notify_state_changed",
+		player.get_meta("player_id"),
+		StateManager.PlayerState.FIGHT,
+		combat_id,
+		combat_phase
 	)

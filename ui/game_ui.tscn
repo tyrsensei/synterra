@@ -44,5 +44,22 @@ disabled = true
 text = "End
 Turn"
 
+[node name="Notifications" type="HBoxContainer" parent="VBoxContainer" unique_id=690083100]
+layout_mode = 2
+alignment = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="VBoxContainer/Notifications" unique_id=1775520020 groups=["combat_prep_ui"]]
+visible = false
+layout_mode = 2
+
+[node name="Label" type="Label" parent="VBoxContainer/Notifications/VBoxContainer" unique_id=1867965513]
+layout_mode = 2
+text = "You can join a new fight !"
+
+[node name="Join Combat Button" type="Button" parent="VBoxContainer/Notifications/VBoxContainer" unique_id=345664632]
+layout_mode = 2
+text = "Join"
+
 [connection signal="button_up" from="VBoxContainer/Combat Bar/Attack Button" to="." method="_on_attack_button_button_up"]
 [connection signal="button_up" from="VBoxContainer/Combat Bar/End Turn Button" to="." method="_on_end_turn_button_button_up"]
+[connection signal="button_up" from="VBoxContainer/Notifications/VBoxContainer/Join Combat Button" to="." method="_on_join_combat_button_button_up"]
