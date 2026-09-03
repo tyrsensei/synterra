@@ -31,7 +31,7 @@ visible = false
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Attack Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1840985094 groups=["combat_ui"]]
+[node name="Attack Button" type="Button" parent="VBoxContainer/Combat Bar" unique_id=1840985094 groups=["combat_ui", "cost_an_action"]]
 visible = false
 layout_mode = 2
 disabled = true

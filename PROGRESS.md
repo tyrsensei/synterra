@@ -1126,6 +1126,7 @@ Avec un seul allié en combat, `sum / num_players` avec `num_players == 1` renvo
 3. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée cette session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
+6. **Bouton "Prêt" en phase `PREP`** : permettre de démarrer le combat dès que tous les participants sont prêts, sans attendre la fin du timer de préparation — objectif : accélérer les tests. Idée notée cette session, pas encore de plan concret. Piste naturelle à évaluer le moment venu : une nouvelle valeur dans l'enum `Action` (aux côtés de `JOIN_COMBAT`/`END_TURN`/`ATTACK_WEAPON`), sur le même principe que `JOIN_COMBAT` qui est déjà une action jouable pendant `PREP`.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)

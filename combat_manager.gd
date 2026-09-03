@@ -36,7 +36,7 @@ func handle_contact(player: Player, enemy: Enemy):
 	_notify_joined(player, player.current_combat_id, combat.phase)
 
 func _start_combat_timer(combat: Combat):
-	await get_tree().create_timer(30.0).timeout
+	await get_tree().create_timer(5.0).timeout
 	if combat.phase == StateManager.CombatState.PREP:
 		combat.start()
 
@@ -59,7 +59,13 @@ func notify_turn_changed(combat_id: int, combatant_path: NodePath):
 	current_turn_combatant[combat_id] = combatant
 	combatant.reset_move()
 	new_turn_received.emit()
-	
+
+@rpc("authority", "call_local")
+func notify_health_changed(path_to_node: NodePath, new_health: int):
+	var combatant = get_node(path_to_node)
+	if combatant is not Combatant:
+		return
+	combatant.current_hp = new_health
 
 @rpc("any_peer", "call_local")
 func request_action(combat_id: int, action: Action):
@@ -100,7 +106,11 @@ func request_action(combat_id: int, action: Action):
 		Action.ATTACK_WEAPON:
 			if combatant.action_used:
 				return
-			#TODO attack action
+			var enemies := combat.get_enemies_in_range(combatant)
+			if enemies.size() == 0:
+				return
+			enemies[0].change_hp(-5)
+			rpc("notify_health_changed", enemies[0].get_path(), enemies[0].current_hp)
 			combatant.action_used = true
 			# Set new available distance
 			combatant.set_available_move()

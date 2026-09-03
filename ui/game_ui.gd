@@ -53,6 +53,7 @@ func _on_end_turn_button_button_up() -> void:
 
 func _on_attack_button_button_up() -> void:
 	print_debug("attack clicked")
+	get_tree().call_group("cost_an_action", "set_disabled", true)
 	var player := StateManager.get_player_from_id(multiplayer.get_unique_id())
 	CombatManager.rpc_id(
 		1,
