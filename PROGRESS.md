@@ -1170,14 +1170,59 @@ Setter GDScript sur `current_hp` : point d'entrée unique pour la mise à jour v
 - Bouton "Prêt" en phase `PREP` — objectif initial de cette session, reporté au profit du retour visuel HP jugé prioritaire pour valider l'attaque. Toujours d'actualité (voir "Prochaines étapes" #6 plus bas).
 - Clarification actée en discussion, non implémentée : le tour d'un ennemi ne bloque rien aujourd'hui (le timer de sécurité de 15s le fait passer automatiquement), mais l'ennemi ne fait rien pendant ce temps — c'est l'item "IA basique" déjà noté plus bas, pas un nouveau trou.
 
+## Session — Bouton "Prêt" en phase PREP ✅
+
+**Objectif de session** : implémenter le point noté depuis plusieurs sessions ("Prochaines étapes" #6 ci-dessous) — démarrer un combat dès que tous les participants sont prêts, sans attendre la fin du timer de préparation.
+
+**Décision actée** : un vrai ready-check, pas un "n'importe qui démarre tout de suite" — chaque participant doit cliquer "Prêt", le combat démarre automatiquement dès que tous l'ont fait ; le timer de préparation reste un filet de sécurité si personne ne clique. État stocké sur `Combat` (`ready_players: Array[Player]`), pas sur `Combatant`/`Player` — cohérent avec `turn_order`/`phase`/`current_turn`, déjà scopés au combat, évite d'avoir à réinitialiser un champ par-joueur entre deux combats successifs.
+
+**Timer de préparation remonté de 5s à 30s** : maintenant que "Ready" permet de shortcut manuellement, plus besoin d'un timer court juste pour accélérer les tests — 30s se rapproche d'un vrai temps de préparation.
+
+**Code committé** :
+```gdscript
+# resources/combat.gd
+var ready_players: Array[Player] = []
+
+func is_everyone_ready():
+	for combatant in turn_order:
+		if combatant is Player and combatant not in ready_players:
+			return false
+	return true
+```
+```gdscript
+# combat_manager.gd, nouvelle valeur READY dans l'enum Action, branche dans request_action
+if action == Action.READY:
+	if combat.phase != StateManager.CombatState.PREP:
+		return
+	var player := StateManager.get_player_from_id(remote_id)
+	if not player or player in combat.ready_players:
+		return
+	combat.ready_players.append(player)
+	if combat.is_everyone_ready():
+		combat.start()
+	return
+```
+Un joueur qui rejoint après coup (via `JOIN_COMBAT`) n'est pas ajouté automatiquement à `ready_players` — il doit cliquer "Prêt" lui aussi, cohérent avec l'objectif.
+
+**Bug UI trouvé et corrigé — le bouton ne s'affichait jamais :** premier essai avec le bouton "Ready" placé dans deux groupes (`combat_prep_ui` et `combat_ui`). Dans `_on_combat_started()`, `combat_ui.show()` le rendait visible, mais `combat_prep_ui.hide()` (appelé juste après, même fonction) l'annulait aussitôt puisqu'il appartenait aussi à ce groupe — et rien n'appelait jamais `combat_prep_ui.show()` pour le révéler. Corrigé en sortant le bouton de `combat_ui` (pas de raison qu'il soit soumis à l'activation/désactivation par tour, qui ne concerne que les actions en phase ONGOING) et en inversant `_on_combat_started()` pour montrer `combat_prep_ui` au lieu de le cacher. Sa disparition en fin de PREP est branchée sur `_on_new_turn()`, qui ne se déclenche jamais avant le tout premier `combat.start()` — sert donc déjà implicitement de signal "PREP terminée", sans signal dédié supplémentaire. Au passage, l'ancien groupe partagé `combat_prep_ui` (notif Join + futur bouton Ready) a été scindé : `combat_join_ui` pour la notif "vous pouvez rejoindre" (non-membres), `combat_prep_ui` réservé au bouton "Ready" (membres en PREP).
+
+**Bug réseau trouvé et corrigé — le combat ne démarrait jamais même les deux joueurs prêts :** `_on_ready_button_button_up` réutilisait `pending_combat_id`, calqué sur le bouton "Join". Ce champ n'est fiable que pour un joueur pas encore membre du combat. Pour le joueur qui **déclenche** le combat par contact direct, `StateManager.notify_state_changed` assigne `player.current_combat_id` **avant** d'émettre `new_combat_available` — son propre `_on_new_combat` se voit donc déjà "en combat" et sort immédiatement sans jamais poser `pending_combat_id`, qui reste à `-1`. Resté invisible jusqu'ici car ni Join ni Attack/End Turn n'en avaient besoin pour ce joueur précis (Attack/End Turn utilisent déjà `player.current_combat_id`). Résultat : le clic "Ready" de l'initiateur envoyait `request_action(-1, READY)`, `currents.get(-1)` renvoyait `null` côté serveur, sortie silencieuse — un seul des deux joueurs s'ajoutait à `ready_players`, `is_everyone_ready()` ne devenait jamais vrai. Corrigé en alignant `_on_ready_button_button_up` sur le pattern déjà utilisé par `_on_end_turn_button_button_up`/`_on_attack_button_button_up` : lire `player.current_combat_id` (toujours fiable) plutôt que `pending_combat_id` (réservé aux candidats pas encore membres).
+
+**Testé cette session, en réseau réel à 2 instances, confirmé par Julien ✅** : le combat démarre dès que les deux joueurs cliquent "Prêt".
+
+**Pas fait / prochaine session :**
+- IA basique de l'ennemi : son tour passe toujours uniquement par le filet de sécurité (timer 15s), aucune action de sa part — toujours pas commencé (reporté depuis plusieurs sessions).
+- Anneau visuel au sol, arme neutre : toujours pas commencés.
+- Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants).
+
 ## Prochaines étapes
 
-1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader, session ci-dessus) — confirmé en réseau réel à 2 instances.
+1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
 2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
-3. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
-4. Repositionnement des joueurs pendant la phase `PREP` — idée notée cette session, pas encore de plan concret.
+3. **IA basique de l'ennemi** : son tour passe aujourd'hui par le seul filet de sécurité du timer (15s), sans aucune action — anneau visuel au sol et arme neutre toujours pas commencés non plus (reportés depuis plusieurs sessions).
+4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
-6. **Bouton "Prêt" en phase `PREP`** : permettre de démarrer le combat dès que tous les participants sont prêts, sans attendre la fin du timer de préparation — objectif : accélérer les tests. Idée notée cette session, pas encore de plan concret. Piste naturelle à évaluer le moment venu : une nouvelle valeur dans l'enum `Action` (aux côtés de `JOIN_COMBAT`/`END_TURN`/`ATTACK_WEAPON`), sur le même principe que `JOIN_COMBAT` qui est déjà une action jouable pendant `PREP`.
+6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session ci-dessus) — confirmé en réseau réel à 2 instances.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)

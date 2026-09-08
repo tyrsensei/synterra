@@ -1,6 +1,7 @@
 extends Node
 
 enum Action {
+	READY,
 	JOIN_COMBAT,
 	END_TURN,
 	ATTACK_WEAPON,
@@ -36,7 +37,7 @@ func handle_contact(player: Player, enemy: Enemy):
 	_notify_joined(player, player.current_combat_id, combat.phase)
 
 func _start_combat_timer(combat: Combat):
-	await get_tree().create_timer(5.0).timeout
+	await get_tree().create_timer(30.0).timeout
 	if combat.phase == StateManager.CombatState.PREP:
 		combat.start()
 
@@ -88,6 +89,18 @@ func request_action(combat_id: int, action: Action):
 		combat.add_participant(player)
 		player.rpc_id(remote_id, "force_position", join_pos)
 		_notify_joined(player, combat_id, combat.phase)
+		return
+	
+	# Ready
+	if action == Action.READY:
+		if combat.phase != StateManager.CombatState.PREP:
+			return
+		var player := StateManager.get_player_from_id(remote_id)
+		if not player or player in combat.ready_players:
+			return
+		combat.ready_players.append(player)
+		if combat.is_everyone_ready():
+			combat.start()
 		return
 	
 	# In combat

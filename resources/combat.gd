@@ -7,12 +7,20 @@ const JOIN_MARGIN := 2.0
 var combat_id: int
 var current_turn := -1
 var turn_order: Array[Combatant] = []
+var ready_players: Array[Player] = []
 var phase: StateManager.CombatState = StateManager.CombatState.PREP
 
 signal combat_end
 signal participant_added(player: Player)
 signal enemy_added(enemy: Enemy)
 signal turn_changed(combatant: Combatant)
+
+func is_everyone_ready():
+	for combatant in turn_order:
+		if combatant is Player and combatant not in ready_players:
+			return false
+	
+	return true
 
 func add_participant(player: Player):
 	turn_order.append(player)
