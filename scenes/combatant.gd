@@ -9,14 +9,35 @@ var move_radius: float
 var move_max_distance: float = 5.0
 var action_used: bool = false
 var max_hp := 10
-var current_hp: int
+var current_hp: int = 0:
+	set(value):
+		current_hp = value
+		health_bar.set_instance_shader_parameter("health", float(current_hp) / max_hp)
 var attack_range: float = 5.0
+
 signal died
 
+var health_bar: MeshInstance3D
+
 func _ready() -> void:
+	_setup_health_bar()
 	current_hp = max_hp
 	initiative = randi_range(0, 10)
 	reset_move()
+	
+
+func _setup_health_bar():
+	health_bar = MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1.0, 0.15)
+	health_bar.mesh = quad
+	health_bar.position.y = 2.2
+	
+	var material := ShaderMaterial.new()
+	material.shader = preload("res://scenes/combatant_health_bar.gdshader")
+	health_bar.material_override = material
+	
+	add_child(health_bar)
 
 func reset_move():
 	move_center = global_position

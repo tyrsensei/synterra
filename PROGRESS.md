@@ -1119,9 +1119,60 @@ Avec un seul allié en combat, `sum / num_players` avec `num_players == 1` renvo
 - Repositionnement des joueurs pendant `PREP` (mentionné comme suite logique de la marge de join, pas encore posé).
 - `JOIN_MARGIN` fixe pour l'instant — à ajuster/exposer si besoin une fois plus de tests en conditions réelles.
 
+## Session — Retour visuel HP (mesh billboard + shader) ✅
+
+**Objectif de session** : fermer la validation de l'effet de l'action Attaque (HP/dégâts, commit `8ea6123`) — jusque-là confirmé uniquement via logs serveur, sans retour visuel côté client.
+
+**Recherche menée avant implémentation** (doc officielle + forums + GitHub) sur l'affichage d'une barre de vie au-dessus d'un `Node3D` en Godot 4 — un `Control`/`ProgressBar` ne peut pas être enfant direct d'un `Node3D` (vit dans un viewport 2D) :
+- `SubViewport` + `Sprite3D` (approche la plus documentée, ex. KidsCanCode) : rendu d'un vrai `ProgressBar` dans un viewport, affiché via une texture sur un `Sprite3D` billboard. **Écartée** : ticket GitHub ouvert et non résolu ([#83898](https://github.com/godotengine/godot/issues/83898)) documentant un rendu imprévisible dès 2+ instances du même setup — pile le scénario multijoueur du projet (plusieurs joueurs + ennemi simultanés).
+- Mesh billboard + shader spatial (`QuadMesh` + `ShaderMaterial`), avec un `instance uniform float health` pour partager un seul matériau entre toutes les instances. **Retenue** : pas de viewport, pas concernée par le bug ci-dessus, approche reconnue côté communauté (godotshaders.com).
+
+**Décision d'architecture — health bar créée en code dans `Combatant._ready()`, pas via scène partagée** : il n'existe pas de scène `combatant.tscn` (seulement une classe de script `class_name Combatant`, héritée par `player.tscn`/`enemy.tscn`, chacune avec sa propre structure de nœuds). Basculer sur de l'héritage de scène Godot (`New Inherited Scene` à partir d'une base commune) aurait été plus idiomatique pour du réglage visuel dans l'éditeur, mais aurait demandé de retoucher la structure de deux scènes déjà configurées (collision, `SpringArm3D`...) pour un seul nœud — écarté comme trop de risque/travail pour ce que ça rapporte à ce stade. La création en code dans `_ready()` (déjà appelé via `super()` par `player.gd`/`enemy.gd`, cf. session "Ordre de tour") garantit un seul point de définition, sans duplication ni risque sur l'existant.
+
+**Code committé (`scenes/combatant.gd`, `scenes/combatant_health_bar.gdshader`)** :
+```gdscript
+var current_hp: int = 0:
+	set(value):
+		current_hp = value
+		health_bar.set_instance_shader_parameter("health", float(current_hp) / max_hp)
+
+var health_bar: MeshInstance3D
+
+func _ready() -> void:
+	_setup_health_bar()
+	current_hp = max_hp
+	initiative = randi_range(0, 10)
+	reset_move()
+
+func _setup_health_bar():
+	health_bar = MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1.0, 0.15)
+	health_bar.mesh = quad
+	health_bar.position.y = 2.2
+	var material := ShaderMaterial.new()
+	material.shader = preload("res://scenes/combatant_health_bar.gdshader")
+	health_bar.material_override = material
+	add_child(health_bar)
+```
+Setter GDScript sur `current_hp` : point d'entrée unique pour la mise à jour visuelle, quel que soit le call site qui écrit la valeur (`change_hp()` côté serveur, ou `notify_health_changed` côté RPC broadcast reçu par chaque client) — pas de duplication de l'appel au shader à chaque endroit qui touche au HP.
+
+**Piège d'ordre anticipé et évité** : `_setup_health_bar()` appelé en premier dans `_ready()`, avant `current_hp = max_hp` — sinon la première écriture de `current_hp` déclencherait le setter avec `health_bar` encore `null`.
+
+**Premier shader du projet — notes pour la suite** :
+- `render_mode unshaded` nécessaire pour une couleur plate, indépendante de l'éclairage de la scène.
+- Pas de `render_mode billboard` en shader spatial (existe uniquement pour les shaders de particules) — le billboard est fait à la main dans `vertex()` via la matrice de vue (`MODELVIEW_MATRIX`/`VIEW_MATRIX`/`INV_VIEW_MATRIX`).
+- `instance uniform` se pilote via `set_instance_shader_parameter()` **sur le nœud** (pas `set_shader_parameter()` sur le matériau, qui écraserait la valeur pour toutes les instances si le matériau était partagé). Ici chaque combattant a de toute façon son propre `ShaderMaterial` (`ShaderMaterial.new()` par instance), donc pas un risque actuel — mais le bon réflexe à garder si le matériau venait à être mutualisé plus tard pour optimiser.
+
+**Testé cette session, en réseau réel à 2 instances, confirmé par Julien ✅** : la barre de vie se met à jour des deux côtés après une attaque. Ferme le point de validation resté ouvert depuis le commit `8ea6123` ("Combat : effet de l'action Attaque").
+
+**Pas fait / prochaine session :**
+- Bouton "Prêt" en phase `PREP` — objectif initial de cette session, reporté au profit du retour visuel HP jugé prioritaire pour valider l'attaque. Toujours d'actualité (voir "Prochaines étapes" #6 plus bas).
+- Clarification actée en discussion, non implémentée : le tour d'un ennemi ne bloque rien aujourd'hui (le timer de sécurité de 15s le fait passer automatiquement), mais l'ennemi ne fait rien pendant ce temps — c'est l'item "IA basique" déjà noté plus bas, pas un nouveau trou.
+
 ## Prochaines étapes
 
-1. **Effet réel de l'action Attaque** : `Action.ATTACK_WEAPON` recentre déjà le cercle de déplacement et consomme le slot d'action du tour (`action_used`) — reste à implémenter l'attaque elle-même (ciblage, dégâts).
+1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader, session ci-dessus) — confirmé en réseau réel à 2 instances.
 2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
 3. Anneau visuel au sol, IA basique, arme neutre : toujours pas commencés (reportés depuis plusieurs sessions).
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée cette session, pas encore de plan concret.
