@@ -17,27 +17,12 @@ var attack_range: float = 5.0
 
 signal died
 
-var health_bar: MeshInstance3D
+@onready var health_bar: MeshInstance3D = $HealthBar
 
 func _ready() -> void:
-	_setup_health_bar()
 	current_hp = max_hp
 	initiative = randi_range(0, 10)
 	reset_move()
-	
-
-func _setup_health_bar():
-	health_bar = MeshInstance3D.new()
-	var quad := QuadMesh.new()
-	quad.size = Vector2(1.0, 0.15)
-	health_bar.mesh = quad
-	health_bar.position.y = 2.2
-	
-	var material := ShaderMaterial.new()
-	material.shader = preload("res://scenes/combatant_health_bar.gdshader")
-	health_bar.material_override = material
-	
-	add_child(health_bar)
 
 func reset_move():
 	move_center = global_position
@@ -54,9 +39,10 @@ func change_hp(points: int):
 		died.emit()
 
 func has_enemy_in_range() -> bool:
-	var node_container = get_node("../Enemies")
+	var current_scene := get_tree().current_scene
+	var node_container := current_scene.get_node("Enemies")
 	if self is Enemy:
-		node_container = get_node("../Players")
+		node_container = current_scene.get_node("Players")
 	for enemy in node_container.get_children():
 		if global_position.distance_to(enemy.global_position) <= attack_range:
 			return true

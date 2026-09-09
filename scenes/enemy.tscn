@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://d14cwon0u5xsk"]
 
 [ext_resource type="Script" uid="uid://dge8g8yfx1uhg" path="res://scenes/enemy.gd" id="1_7p1mj"]
+[ext_resource type="PackedScene" uid="uid://bsrl68ppwwjvq" path="res://scenes/health_bar.tscn" id="2_md0e3"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_4nir5"]
 
@@ -37,5 +38,7 @@ collision_mask = 2
 [node name="CollisionShape3D" type="CollisionShape3D" parent="PlayerDetector" unique_id=317263722]
 transform = Transform3D(3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0)
 shape = SubResource("SphereShape3D_4nir5")
+
+[node name="HealthBar" parent="." unique_id=1014124979 instance=ExtResource("2_md0e3")]
 
 [connection signal="body_entered" from="PlayerDetector" to="." method="_on_player_detector_body_entered"]

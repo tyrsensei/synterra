@@ -1,0 +1,18 @@
+[gd_scene format=3 uid="uid://bsrl68ppwwjvq"]
+
+[ext_resource type="Shader" uid="uid://d8xy2vlqrghq" path="res://scenes/combatant_health_bar.gdshader" id="1_1bvlm"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_n6f5g"]
+render_priority = 0
+shader = ExtResource("1_1bvlm")
+shader_parameter/use_billboard = true
+shader_parameter/color = Color(0.1, 0.8, 0.1, 1)
+shader_parameter/background_color = Color(0.2, 0, 0, 1)
+
+[sub_resource type="QuadMesh" id="QuadMesh_4nir5"]
+material = SubResource("ShaderMaterial_n6f5g")
+size = Vector2(1, 0.15)
+
+[node name="HealthBar" type="MeshInstance3D" unique_id=1014124979]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.2, 0)
+mesh = SubResource("QuadMesh_4nir5")

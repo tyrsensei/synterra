@@ -9,11 +9,6 @@ signal new_combat_available(combat_id: int)
 
 func _ready() -> void:
 	NetworkManager.client_connected.connect(get_states)
-	
-@rpc("any_peer")
-func request_state_change(new_state: PlayerState, combat_id: int = -1):
-	var player_id := multiplayer.get_remote_sender_id()
-	rpc("notify_state_changed", player_id, new_state, combat_id)
 
 @rpc("authority", "call_local")
 func notify_state_changed(

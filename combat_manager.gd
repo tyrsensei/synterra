@@ -76,40 +76,46 @@ func request_action(combat_id: int, action: Action):
 	var combat: Combat = currents.get(combat_id)
 	if not combat:
 		return
-	
-	# Join (no started combat)
-	if action == Action.JOIN_COMBAT:
-		print_debug("join combat requested")
-		if combat.phase != StateManager.CombatState.PREP:
-			return
-		var player := StateManager.get_player_from_id(remote_id)
-		if not player or player.current_combat_id != -1:
-			return
-		var join_pos := combat.get_join_position()
-		combat.add_participant(player)
-		player.rpc_id(remote_id, "force_position", join_pos)
-		_notify_joined(player, combat_id, combat.phase)
+
+	match action:
+		Action.JOIN_COMBAT:
+			_handle_join(combat, combat_id, remote_id)
+		Action.READY:
+			_handle_ready(combat, combat_id, remote_id)
+		Action.END_TURN, Action.ATTACK_WEAPON:
+			_handle_combat_action(combat, remote_id, action)
+
+func _handle_join(combat: Combat, combat_id: int, remote_id: int):
+	print_debug("join combat requested")
+	if combat.phase != StateManager.CombatState.PREP:
 		return
-	
-	# Ready
-	if action == Action.READY:
-		if combat.phase != StateManager.CombatState.PREP:
-			return
-		var player := StateManager.get_player_from_id(remote_id)
-		if not player or player in combat.ready_players:
-			return
-		combat.ready_players.append(player)
-		if combat.is_everyone_ready():
-			combat.start()
+	var player := StateManager.get_player_from_id(remote_id)
+	if not player or player.current_combat_id != -1:
 		return
-	
-	# In combat
+	var join_pos := combat.get_join_position()
+	combat.add_participant(player)
+	player.rpc_id(remote_id, "force_position", join_pos)
+	_notify_joined(player, combat_id, combat.phase)
+
+func _handle_ready(combat: Combat, combat_id: int, remote_id: int):
+	if combat.phase != StateManager.CombatState.PREP:
+		return
+	var player := StateManager.get_player_from_id(remote_id)
+	if (
+		not player
+		or player in combat.ready_players
+		or player.current_combat_id != combat_id
+	):
+		return
+	combat.ready_players.append(player)
+	if combat.is_everyone_ready():
+		combat.start()
+
+func _handle_combat_action(combat: Combat, remote_id: int, action: Action):
 	if combat.phase != StateManager.CombatState.ONGOING:
 		return
 	var combatant := combat.get_current_combatant()
-	if not combatant:
-		combatant = StateManager.get_player_from_id(remote_id)
-	if combatant.get_meta("player_id") != remote_id:
+	if combatant is not Player or combatant.get_meta("player_id") != remote_id:
 		return
 
 	match action:
@@ -121,12 +127,11 @@ func request_action(combat_id: int, action: Action):
 				return
 			var enemies := combat.get_enemies_in_range(combatant)
 			if enemies.size() == 0:
+				rpc_id(remote_id, "notify_action_rejected")
 				return
 			enemies[0].change_hp(-5)
 			rpc("notify_health_changed", enemies[0].get_path(), enemies[0].current_hp)
 			combatant.action_used = true
-			# Set new available distance
-			combatant.set_available_move()
 
 func get_combat(combat_id: int) -> Combat:
 	return currents[combat_id]
@@ -147,3 +152,7 @@ func _notify_joined(player: Player, combat_id: int, combat_phase: StateManager.C
 		combat_id,
 		combat_phase
 	)
+
+@rpc("authority", "call_remote")
+func notify_action_rejected():
+	get_tree().call_group("cost_an_action", "set_disabled", false)

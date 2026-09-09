@@ -1215,14 +1215,51 @@ Un joueur qui rejoint après coup (via `JOIN_COMBAT`) n'est pas ajouté automati
 - Anneau visuel au sol, arme neutre : toujours pas commencés.
 - Rattrapage réseau tardif de `current_turn_combatant`, remise à zéro de l'état de combat en fin de combat : toujours ouverts (non bloquants).
 
+## Session — Revue de code combat (bugs + complexité), fiabilisation du bouton Attaque
+
+**Objectif de session** : Julien a demandé une revue du code de combat existant, jugé trop complexe pour continuer sereinement à empiler des features dessus (principe KISS explicitement posé). Traitement itératif des points remontés, un à la fois, plutôt qu'un cadrage global en amont.
+
+**Corrections de validation/robustesse (petits bugs, faible risque)** :
+- `Action.READY` ([combat_manager.gd](combat_manager.gd)) ne vérifiait pas que le joueur appartenait au combat ciblé — contrairement à `JOIN_COMBAT`, qui vérifie déjà `current_combat_id`. Un joueur ailleurs sur la carte pouvait "ready up" un combat auquel il ne participait pas (sans conséquence grave, le check de tour protège la suite, mais polluait `ready_players`). Corrigé en ajoutant `player.current_combat_id != combat_id` au garde-fou.
+- `combatant.get_meta("player_id")` levait une erreur de log bruyante (metadata absente) quand c'était le tour d'un `Enemy` — corrigé en testant `combatant is not Player` avant.
+
+**Refactoring de clarté, comportement inchangé (demande explicite de simplification)** :
+- `request_action` (une seule fonction de ~60 lignes routant 4 actions différentes) découpée en `_handle_join`/`_handle_ready`/`_handle_combat_action` — la RPC ne fait plus que router via `match`.
+- `Combat.next_turn()` ([resources/combat.gd](resources/combat.gd)) réinitialisait `action_used` du combattant qui **termine** son tour (fonctionnait par accident de timing, et reposait sur l'indexation négative de GDScript au tout premier appel depuis `start()`, `turn_order[-1]`). Inversé : incrémente `current_turn` d'abord, reset `action_used` ensuite sur le nouvel index — lecture directe "j'entre dans le tour de X, je lui redonne son action".
+- Barre de vie sortie du code : `Combatant::_setup_health_bar()` (assemblage procédural d'un `MeshInstance3D` + `ShaderMaterial` en `_ready()`) supprimée, remplacée par une scène réutilisable `scenes/health_bar.tscn`, instanciée dans `player.tscn`/`enemy.tscn`. `Combatant.health_bar` redevient un simple `@onready var health_bar: MeshInstance3D = $HealthBar`.
+- `request_state_change` (`state_manager.gd`) supprimée — vestige d'avant que `CombatManager` déclenche directement les transitions d'état, plus aucun appelant depuis plusieurs sessions.
+
+**Nouveau document créé : [NETWORKING.md](NETWORKING.md)** — guide de décision (deux diagrammes Mermaid) pour trancher rapidement "cette donnée de combat : locale, `MultiplayerSynchronizer`, ou RPC arbitrée par le serveur ?", plus le piège récurrent d'autorité réseau (un nœud comme `Player`, dont l'autorité est le **client** propriétaire — pas le serveur — ne peut pas recevoir de RPC `@rpc("authority", ...)` appelée par le serveur ; pattern `any_peer` + garde manuelle obligatoire, déjà vu sur `force_position`, revu deux fois cette session). Une version visuelle est publiée en Artifact ("Aiguillage Réseau") pour consultation rapide sans rouvrir le `.md`.
+
+**Bug de synchro réseau trouvé et corrigé — `move_center`/`move_radius` (cercle de déplacement en combat) redevenait celui du début de tour après une attaque** : `Combatant.set_available_move()` était appelée côté **serveur** dans `request_action` (branche `ATTACK_WEAPON`), qui ne mute que la copie du nœud `Player` détenue par le serveur — jamais celle du client, seule à exécuter réellement le clamp de mouvement (`is_multiplayer_authority()`). Classée via l'arbre de décision de `NETWORKING.md` : donnée purement locale au client (personne d'autre ne la lit, jamais validée serveur de toute façon — cohérent avec la décision déjà actée de ne pas valider le mouvement). Corrigée en sortant l'appel de `combat_manager.gd` et en l'appelant directement côté client, dans `game_ui.gd::_on_attack_button_button_up`, au moment du clic — zéro RPC nécessaire.
+
+**Fiabilisation du bouton Attaque (il pouvait rester grisé sans retour, ou pire, actif hors combat)** :
+- `Combatant.has_enemy_in_range()` (écrite il y a plusieurs sessions, jamais branchée) connectée à un nouveau `_process()` dans `game_ui.gd`, qui pilote en direct l'état actif/grisé du bouton selon la portée réelle — combinée à un booléen local `attack_used_this_turn` (reset à chaque tour) pour ne pas réactiver le bouton après une attaque déjà consommée.
+- Filet de sécurité serveur ajouté : RPC ciblée `notify_action_rejected` réactive le bouton si le serveur refuse malgré tout l'attaque (aucun ennemi à portée au moment du traitement — cas limite de latence réseau).
+- **Bug de chemin relatif trouvé en branchant `has_enemy_in_range()`** : `get_node("../Enemies")` supposait `Enemies` enfant de `Players`, alors que les deux sont frères sous `Game` (ou `Test`). Une tentative intermédiaire avec les noms uniques de scène (`%Enemies`) a été écartée : la résolution `%` s'appuie sur la chaîne `owner` des nœuds, or `Player`/`Enemy` sont instanciés à l'exécution (`PackedScene.instantiate()` + `add_child()` par `NetworkManager`/`MultiplayerSpawner`) et n'héritent jamais d'un `owner` côté scène parente — limitation connue de Godot avec le spawn dynamique, à retenir pour toute future tentative de `%unique_name` sur `Player`/`Enemy`. Corrigé en `get_tree().current_scene.get_node("Enemies")` (indépendant de la profondeur de l'appelant, fonctionne dans `game.tscn` comme dans `tests/test.tscn`).
+- **Bug plus sournois trouvé en testant : possible d'attaquer avant même la phase `ONGOING`.** Cause réelle : `CombatManager.is_player_turn()` répond en fait à deux questions différentes selon le contexte — *"suis-je libre de bouger"* (vrai hors combat, `current_combat_id == -1`) et *"c'est mon tour de combat"* (vrai seulement en `ONGOING`). Le nouveau `_process()` de `game_ui.gd` tournant dès l'exploration (avant tout combat), dès que le joueur marchait à portée d'un ennemi le bouton se retrouvait activé en coulisses ; `_on_combat_started()` ne remettait jamais `disabled = true` en entrant en combat (asymétrie avec `_on_combat_ended()`, qui le fait déjà). Corrigé par un garde explicite `player.current_combat_id == -1` dans `_process()`, plus l'ajout du reset défensif dans `_on_combat_started()`.
+
+**Testé cette session, confirmé par Julien ✅** : cercle de déplacement après attaque (`move_center`), activation/désactivation du bouton Attaque selon la portée réelle, blocage après usage, et disparition du bug "attaque possible avant `ONGOING`".
+
+**Pas fait / prochaine session :**
+- `is_player_turn()` mélange toujours deux sens ("libre de bouger" / "mon tour de combat") — patché localement dans `game_ui.gd` via le garde `current_combat_id == -1`, la fonction elle-même n'a pas été clarifiée/scindée. Un futur appelant qui la réutilise sans ce garde retomberait dans le même piège.
+- `CombatManager.new_turn_received` est un signal global à **tous** les combats de la partie, pas filtré par combat ni par joueur — chaque changement de tour, n'importe où sur la carte, déclenche `_on_new_turn()` chez tout le monde. Fonctionne tant qu'un seul combat est actif à la fois ; à surveiller si plusieurs combats simultanés deviennent courants.
+- Lacune connue depuis plusieurs sessions, toujours ouverte : `Combat.end()`/le signal `died` ne sont écoutés par personne — un ennemi à 0 PV reste dans `turn_order`, un combat ne se termine jamais de lui-même.
+- Bug mineur noté, pas traité : le bouton "Join" reste visible pour un joueur spectateur même après qu'un combat soit passé en `ONGOING` — rien ne diffuse la fin de la phase PREP aux non-participants qui avaient reçu la notification globale.
+- Chantier structurant identifié mais volontairement repoussé (choix explicite de Julien : nettoyages rapides d'abord) : fusionner `StateManager`/`CombatManager`, qui portent chacun une partie de la vérité "ce joueur est-il en combat ?" (`PlayerState.FIGHT` d'un côté, `current_combat_id` de l'autre) et s'appellent mutuellement. Raisonnement complet dans la discussion ayant mené à `NETWORKING.md`, pas commencé.
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
-2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat.
+2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat (voir aussi point 9 ci-dessous, `Combat.end()` jamais appelé).
 3. **IA basique de l'ennemi** : son tour passe aujourd'hui par le seul filet de sécurité du timer (15s), sans aucune action — anneau visuel au sol et arme neutre toujours pas commencés non plus (reportés depuis plusieurs sessions).
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
-6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session ci-dessus) — confirmé en réseau réel à 2 instances.
+6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session dédiée) — confirmé en réseau réel à 2 instances.
+7. ~~**Revue de code combat + fiabilisation du bouton Attaque**~~ **Fait et validé** (session ci-dessus) — voir le détail complet plus haut.
+8. `CombatManager.is_player_turn()` à clarifier/scinder (mélange "libre de bouger" et "mon tour de combat") — patché localement en session, pas résolu à la source.
+9. Fusion `StateManager`/`CombatManager` (double source de vérité "ce joueur est-il en combat ?") — identifiée en session, volontairement repoussée après les nettoyages rapides.
+10. Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING` — noté en session, pas traité.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
@@ -1239,3 +1276,4 @@ Un joueur qui rejoint après coup (via `JOIN_COMBAT`) n'est pas ajouté automati
 - Éditeur de niveaux intégré : abandonné (trop de complexité pour un projet solo) — mode "construction" in-game envisagé comme alternative future
 - Renderer Compatibility (OpenGL 3.3 / ES 3.0) pour accessibilité max + export WebGL
 - Rattrapage d'état pour les connexions tardives : RPC ciblé (`rpc_id`) plutôt que `MultiplayerSynchronizer` dédié, pour toute propriété événementielle décidée côté serveur (voir session ci-dessus pour le raisonnement complet)
+- Choix entre donnée locale / `MultiplayerSynchronizer` / RPC serveur pour une nouvelle donnée de combat : voir [NETWORKING.md](NETWORKING.md), qui formalise ce raisonnement en arbre de décision — s'y référer avant de re-débattre au cas par cas

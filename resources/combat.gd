@@ -50,8 +50,8 @@ func get_current_combatant() -> Combatant:
 	return turn_order[current_turn]
 
 func next_turn():
-	turn_order[current_turn].action_used = false
 	current_turn = (current_turn + 1) % turn_order.size()
+	turn_order[current_turn].action_used = false
 	turn_changed.emit(turn_order[current_turn])
 
 func get_join_position() -> Vector3:
