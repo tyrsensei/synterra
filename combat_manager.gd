@@ -44,6 +44,8 @@ func _start_combat_timer(combat: Combat):
 
 func _on_turn_changed(combatant: Combatant, combat: Combat):
 	_start_turn_timer(combat)
+	if combatant is Enemy:
+		_handle_enemy_turn(combat, combatant)
 	rpc("notify_turn_changed", combat.combat_id, combatant.get_path())
 
 func _on_combat_ended(combat: Combat):
@@ -61,6 +63,18 @@ func _start_turn_timer(combat: Combat):
 	await get_tree().create_timer(15.0).timeout
 	if combat.current_turn == saved_turn:
 		combat.next_turn()
+
+func _handle_enemy_turn(combat: Combat, enemy: Enemy):
+	await get_tree().create_timer(1.0).timeout
+	var players := combat.get_targets_in_range(enemy)
+	if players.size() == 0:
+		players[0].change_hp(-2)
+		rpc(
+			"notify_health_changed",
+			players[0].get_path(),
+			players[0].current_hp
+		)
+	combat.next_turn()
 
 @rpc("authority", "call_local")
 func notify_turn_changed(combat_id: int, combatant_path: NodePath):
@@ -136,7 +150,7 @@ func _handle_combat_action(combat: Combat, remote_id: int, action: Action):
 		Action.ATTACK_WEAPON:
 			if combatant.action_used:
 				return
-			var enemies := combat.get_enemies_in_range(combatant)
+			var enemies := combat.get_targets_in_range(combatant)
 			if enemies.size() == 0:
 				rpc_id(remote_id, "notify_action_rejected")
 				return

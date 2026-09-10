@@ -70,15 +70,16 @@ func get_join_position() -> Vector3:
 	var angle := randf() * TAU
 	return center + Vector3(cos(angle), 0, sin(angle)) * JOIN_MARGIN
 
-func get_enemies_in_range(attacker: Combatant) -> Array[Enemy]:
-	var candidates: Array[Enemy] = []
+func get_targets_in_range(attacker: Combatant) -> Array[Combatant]:
+	var candidates: Array[Combatant] = []
 	for combatant in turn_order:
-		if combatant is not Enemy:
+		var is_opponent := (
+			(attacker is Player and combatant is Enemy)
+			or (attacker is Enemy and combatant is Player)
+		)
+		if not is_opponent or combatant.current_hp <= 0:
 			continue
-		if (
-			attacker.global_position.distance_to(combatant.global_position) <= attacker.attack_range
-			and combatant.current_hp > 0
-		):
+		if attacker.global_position.distance_to(combatant.global_position) <= attacker.attack_range:
 			candidates.append(combatant)
 	candidates.sort_custom(func(a, b):
 		return (

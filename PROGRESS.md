@@ -1273,11 +1273,47 @@ Un joueur qui rejoint après coup (via `JOIN_COMBAT`) n'est pas ajouté automati
 - Récap de fin de combat : idée mentionnée par Julien en actant la décision de garder les morts dans `turn_order` — pas posée, motive ce choix pour plus tard.
 - Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous) : IA basique, `is_player_turn()` à clarifier, fusion `StateManager`/`CombatManager`, bouton "Join" visible après `ONGOING`.
 
+## Session — IA basique de l'ennemi (attaque ou passe) ✅
+
+**Objectif de session** : sortir l'ennemi de sa passivité totale — jusqu'ici son tour ne faisait rien, seul le timer de sécurité (15s) le faisait passer. Scope volontairement limité : attaquer si un joueur est à portée, sinon passer — pas de déplacement/chase, qui reste un sujet à part (premier mouvement scripté d'un ennemi, pathfinding basique).
+
+**Mutualisation `get_enemies_in_range()` → `get_targets_in_range()` (`resources/combat.gd`)**, décidée avant l'implémentation de l'IA : plutôt que dupliquer une fonction symétrique "joueurs à portée", la fonction déduit elle-même le camp adverse depuis le type de l'attaquant (`(attacker is Player and combatant is Enemy) or (attacker is Enemy and combatant is Player)`) — même principe déjà posé dans `Combatant.has_enemy_in_range()` (branche sur `self is Enemy`). Alternative écartée : passer le type recherché en paramètre (`is_instance_of()`) — plus explicite à l'appel mais réintroduit un paramètre que la fonction peut déduire seule, et rompt la cohérence avec `has_enemy_in_range()`. Retour typé `Array[Combatant]` (pas `Array[Enemy]`) : aucun appelant n'a besoin d'un type plus précis, `change_hp()`/`global_position` sont déjà sur `Combatant`. Les deux appelants existant (`_handle_combat_action::ATTACK_WEAPON`) et nouveau (IA ennemie) branchent dessus sans cast.
+
+**Piège anticipé avant d'écrire le code — récursivité signal/next_turn() :** `combat_manager.gd::_on_turn_changed()` est connecté au signal `Combat.turn_changed`, lui-même émis par `next_turn()`. Faire avancer le tour de l'ennemi *depuis* ce callback (appel synchrone à `combat.next_turn()`) aurait ré-émis le signal et ré-appelé `_on_turn_changed()` de façon récursive si le tour suivant tombe aussi sur un ennemi — sans risque avec le nombre actuel de combattants, mais un vrai piège dès plusieurs ennemis par combat. Deux corrections possibles comparées : `call_deferred()` (repousse l'exécution en fin de frame, zéro délai perceptible) vs un `await` avant d'agir (même effet de rupture de pile, avec en prime une pause "l'ennemi réfléchit"). **Retenu : l'`await`** — Julien a jugé la pause de rythme désirable de toute façon pour un tour ennemi instantané, perçu comme bizarre en test.
+
+**Code committé (`combat_manager.gd`)** :
+```gdscript
+func _on_turn_changed(combatant: Combatant, combat: Combat):
+	_start_turn_timer(combat)
+	if combatant is Enemy:
+		_handle_enemy_turn(combat, combatant)
+	rpc("notify_turn_changed", combat.combat_id, combatant.get_path())
+
+func _handle_enemy_turn(combat: Combat, enemy: Enemy):
+	await get_tree().create_timer(1.0).timeout
+	var players := combat.get_targets_in_range(enemy)
+	if players.size():
+		players[0].change_hp(-2)
+		rpc("notify_health_changed", players[0].get_path(), players[0].current_hp)
+	combat.next_turn()
+```
+`_handle_enemy_turn` appelée sans être attendue (même pattern que `_start_turn_timer` juste au-dessus) — l'`await` interne suspend la fonction avant le `next_turn()` final, qui ne s'exécute donc jamais imbriqué dans la pile d'appel d'origine. Le filet de sécurité `_start_turn_timer` (15s) reste actif même pour les tours ennemis, en secours si `_handle_enemy_turn` venait à échouer.
+
+**Testé cette session, en réseau réel ✅** : l'ennemi attaque bien quand un joueur est à portée à son tour, passe sinon, confirmé par Julien.
+
+**Trou identifié en relisant le code, pas corrigé — devenu réellement atteignable avec cette feature :** si l'ennemi tue le dernier joueur vivant, `next_turn()` boucle indéfiniment pour retomber sur lui-même (aucun autre combattant vivant) et rejoue son tour en boucle toutes les secondes sans rien faire (plus aucune cible). Pas un bug introduit par ce code — c'est le trou "défaite non gérée" déjà mis de côté en fermant la boucle de combat (voir session précédente) — mais jusqu'ici purement théorique puisque les ennemis ne pouvaient tuer personne ; à traiter dans une session dédiée à la défaite/game over.
+
+**Pas fait / prochaine session :**
+- Défaite (tous les joueurs morts) : trou ci-dessus, désormais atteignable en pratique, pas encore traité.
+- Déplacement/chase de l'ennemi vers le joueur le plus proche quand personne n'est à portée : scope volontairement reporté.
+- Style mineur noté, pas traité : `if players.size():` (vérité sur l'entier) au lieu du style `if ... .size() == 0:` déjà utilisé ailleurs — cosmétique, sans impact.
+- Reste du backlog inchangé : `is_player_turn()` à clarifier, fusion `StateManager`/`CombatManager`, bouton "Join" visible après `ONGOING`, repositionnement en `PREP`, anneau visuel au sol, arme neutre.
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
-2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session ci-dessus) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. Rattrapage tardif de `current_turn_combatant` reste ouvert (non bloquant).
-3. **IA basique de l'ennemi** : son tour passe aujourd'hui par le seul filet de sécurité du timer (15s), sans aucune action — anneau visuel au sol et arme neutre toujours pas commencés non plus (reportés depuis plusieurs sessions).
+2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session précédente) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. Rattrapage tardif de `current_turn_combatant` reste ouvert (non bloquant).
+3. ~~**IA basique de l'ennemi**~~ **Fait et validé** (session ci-dessus) : attaque si joueur à portée, sinon passe — confirmé en réseau réel. Déplacement/chase et gestion de la défaite restent ouverts (voir détail plus haut).
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session dédiée) — confirmé en réseau réel à 2 instances.
