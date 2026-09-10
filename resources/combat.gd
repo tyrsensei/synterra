@@ -31,6 +31,8 @@ func add_enemy(enemy: Enemy):
 	turn_order.append(enemy)
 	enemy_added.emit(enemy)
 	enemy.current_combat_id = self.combat_id
+	enemy.died.connect(_check_victory)
+	
 
 func start():
 	turn_order.sort_custom(
@@ -51,6 +53,8 @@ func get_current_combatant() -> Combatant:
 
 func next_turn():
 	current_turn = (current_turn + 1) % turn_order.size()
+	while turn_order[current_turn].current_hp == 0:
+		current_turn = (current_turn + 1) % turn_order.size()
 	turn_order[current_turn].action_used = false
 	turn_changed.emit(turn_order[current_turn])
 
@@ -71,7 +75,10 @@ func get_enemies_in_range(attacker: Combatant) -> Array[Enemy]:
 	for combatant in turn_order:
 		if combatant is not Enemy:
 			continue
-		if attacker.global_position.distance_to(combatant.global_position) <= attacker.attack_range:
+		if (
+			attacker.global_position.distance_to(combatant.global_position) <= attacker.attack_range
+			and combatant.current_hp > 0
+		):
 			candidates.append(combatant)
 	candidates.sort_custom(func(a, b):
 		return (
@@ -80,3 +87,9 @@ func get_enemies_in_range(attacker: Combatant) -> Array[Enemy]:
 		)
 	)
 	return candidates
+
+func _check_victory():
+	for combatant:Combatant in turn_order:
+		if combatant is Enemy and combatant.current_hp > 0:
+			return
+	end()

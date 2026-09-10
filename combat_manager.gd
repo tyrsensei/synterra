@@ -27,6 +27,7 @@ func handle_contact(player: Player, enemy: Enemy):
 	else:
 		combat = Combat.new()
 		combat.turn_changed.connect(_on_turn_changed.bind(combat))
+		combat.combat_end.connect(_on_combat_ended.bind(combat))
 		combat.combat_id = _next_combat_id
 		_next_combat_id+=1
 		combat.add_enemy(enemy)
@@ -44,6 +45,16 @@ func _start_combat_timer(combat: Combat):
 func _on_turn_changed(combatant: Combatant, combat: Combat):
 	_start_turn_timer(combat)
 	rpc("notify_turn_changed", combat.combat_id, combatant.get_path())
+
+func _on_combat_ended(combat: Combat):
+	for combatant in combat.turn_order:
+		if combatant is Player:
+			StateManager.rpc(
+				"notify_state_changed",
+				combatant.get_meta("player_id"),
+				StateManager.PlayerState.EXPLORATION
+			)
+	currents.erase(combat.combat_id)
 
 func _start_turn_timer(combat: Combat):
 	var saved_turn:= combat.current_turn

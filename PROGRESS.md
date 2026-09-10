@@ -1248,10 +1248,35 @@ Un joueur qui rejoint après coup (via `JOIN_COMBAT`) n'est pas ajouté automati
 - Bug mineur noté, pas traité : le bouton "Join" reste visible pour un joueur spectateur même après qu'un combat soit passé en `ONGOING` — rien ne diffuse la fin de la phase PREP aux non-participants qui avaient reçu la notification globale.
 - Chantier structurant identifié mais volontairement repoussé (choix explicite de Julien : nettoyages rapides d'abord) : fusionner `StateManager`/`CombatManager`, qui portent chacun une partie de la vérité "ce joueur est-il en combat ?" (`PlayerState.FIGHT` d'un côté, `current_combat_id` de l'autre) et s'appellent mutuellement. Raisonnement complet dans la discussion ayant mené à `NETWORKING.md`, pas commencé.
 
+## Session — Fermeture de la boucle de combat (mort, victoire, fin de combat) ✅
+
+**Objectif de session** : traiter le point le plus ancien du backlog — `Combat.end()`/le signal `died` n'étaient écoutés par personne, un ennemi à 0 PV restait dans `turn_order`, un combat ne se terminait jamais de lui-même.
+
+**Décision actée avant implémentation — combattants morts gardés dans `turn_order`, filtrés par `current_hp > 0` à la lecture, plutôt que retirés du tableau.** Alternative écartée : retirer immédiatement un combattant mort, plus simple pour les lectures (`get_enemies_in_range`, `next_turn`...) mais oblige à corriger `current_turn` à la main pour éviter un décalage d'index. Le filtrage évite ce risque, et garde l'historique complet du combat dans `turn_order` — utile pour un futur récap de fin de combat (idée mentionnée par Julien en décidant, pas encore posée).
+
+**Code committé** :
+- `resources/combat.gd::add_enemy()` : connecte `enemy.died` à une nouvelle fonction `_check_victory()`, qui parcourt `turn_order` et appelle `end()` si plus aucun `Enemy` n'a `current_hp > 0` (condition de victoire uniquement — la défaite, tous les joueurs morts, reste hors scope, aucune conséquence/respawn définie pour l'instant).
+- `next_turn()` : boucle désormais sur l'index tant que `turn_order[current_turn].current_hp == 0`, pour sauter les morts en avançant le tour.
+- `get_enemies_in_range()` : ajout du filtre `combatant.current_hp > 0` — sans ça, un ennemi mort restait une cible valide pour l'action Attaque.
+- `combat_manager.gd::handle_contact()` : connecte `combat.combat_end` à un nouveau `_on_combat_ended(combat)`, même pattern que `combat.turn_changed`/`_on_turn_changed`.
+- `_on_combat_ended()` : boucle sur `combat.turn_order`, filtre les `Player`, et appelle `StateManager.rpc("notify_state_changed", ..., EXPLORATION)` pour chacun (un seul joueur traité par appel, même pattern que `_notify_joined`/`_handle_join` — pas de variante broadcast à inventer), puis retire le combat de `currents`.
+
+**Bug trouvé et corrigé en testant — joueurs toujours bloqués en mouvement après la fin du combat :** le premier appel RPC dans `_on_combat_ended` passait `combat.combat_id` en 3ᵉ argument de `notify_state_changed` (calqué sur `_notify_joined`, où ça a du sens puisqu'on *rejoint* un combat). Pour la fin de combat c'est l'inverse : `notify_state_changed` assigne ce 3ᵉ argument à `player.current_combat_id`, donc repasser l'id du combat qui vient de se terminer le laissait non remis à `-1` — déclenchant toujours le bloc "Limit if in combat" de `player.gd::_physics_process()` (gate sur `current_combat_id != -1`) malgré un état `EXPLORATION` par ailleurs correct. Corrigé en ne passant pas ce 3ᵉ argument (valeur par défaut `-1` dans la signature de `notify_state_changed`).
+
+**Clarifié en cours de session** : le signal `StateManager.combat_ended` (déjà existant, pas celui de `Combat`) n'était pas mort comme supposé — `ui/game_ui.gd` l'écoute bien pour cacher l'UI de combat côté client local ; il manquait seulement d'être déclenché à la fin d'un combat, fermé par ce qui précède.
+
+**Testé cette session, en réseau réel ✅** : un combat se termine bien à la mort du dernier ennemi, les joueurs retrouvent un mouvement libre (confirmé après le fix du bug ci-dessus).
+
+**Pas fait / prochaine session :**
+- Rattrapage réseau tardif de `current_turn_combatant` pour une connexion en plein combat : toujours ouvert (non bloquant, noté depuis plusieurs sessions).
+- Défaite (tous les joueurs morts) : explicitement hors scope cette session, aucune conséquence/respawn défini.
+- Récap de fin de combat : idée mentionnée par Julien en actant la décision de garder les morts dans `turn_order` — pas posée, motive ce choix pour plus tard.
+- Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous) : IA basique, `is_player_turn()` à clarifier, fusion `StateManager`/`CombatManager`, bouton "Join" visible après `ONGOING`.
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
-2. Trous non bloquants toujours ouverts, à traiter si/quand le cas se présente en test : rattrapage de `current_turn_combatant` pour une connexion tardive en plein combat, remise à zéro de l'état de combat en fin de combat (voir aussi point 9 ci-dessous, `Combat.end()` jamais appelé).
+2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session ci-dessus) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. Rattrapage tardif de `current_turn_combatant` reste ouvert (non bloquant).
 3. **IA basique de l'ennemi** : son tour passe aujourd'hui par le seul filet de sécurité du timer (15s), sans aucune action — anneau visuel au sol et arme neutre toujours pas commencés non plus (reportés depuis plusieurs sessions).
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
