@@ -11,6 +11,7 @@ func _ready() -> void:
 	StateManager.combat_ended.connect(_on_combat_ended)
 	StateManager.new_combat_available.connect(_on_new_combat)
 	CombatManager.new_turn_received.connect(_on_new_turn)
+	CombatManager.join_rejected.connect(_on_join_rejected)
 
 func _process(_delta: float) -> void:
 	var player := _get_player()
@@ -21,7 +22,10 @@ func _process(_delta: float) -> void:
 		attack_used_this_turn or not player.has_enemy_in_range()
 	)
 
-	
+func _on_join_rejected():
+	pending_combat_id = -1
+	get_tree().call_group("combat_join_ui", "hide")
+
 func _get_player() -> Player:
 	if not local_player:
 		local_player = StateManager.get_player_from_id(multiplayer.get_unique_id())

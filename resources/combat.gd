@@ -6,13 +6,12 @@ class_name Combat
 const JOIN_MARGIN := 2.0
 var combat_id: int
 var current_turn := -1
+var turn_number := 0
 var turn_order: Array[Combatant] = []
 var ready_players: Array[Player] = []
 var phase: StateManager.CombatState = StateManager.CombatState.PREP
 
 signal combat_end
-signal participant_added(player: Player)
-signal enemy_added(enemy: Enemy)
 signal turn_changed(combatant: Combatant)
 
 func is_everyone_ready():
@@ -22,17 +21,10 @@ func is_everyone_ready():
 	
 	return true
 
-func add_participant(player: Player):
-	turn_order.append(player)
-	participant_added.emit(player)
-	player.current_combat_id = self.combat_id
-
-func add_enemy(enemy: Enemy):
-	turn_order.append(enemy)
-	enemy_added.emit(enemy)
-	enemy.current_combat_id = self.combat_id
-	enemy.died.connect(_check_victory)
-	
+func add_combatant(combatant: Combatant):
+	turn_order.append(combatant)
+	combatant.current_combat_id = self.combat_id
+	combatant.died.connect(_check_combat_end)
 
 func start():
 	turn_order.sort_custom(
@@ -45,6 +37,8 @@ func start():
 	next_turn()
 
 func end():
+	for combatant in turn_order:
+		combatant.died.disconnect(_check_combat_end)
 	phase = StateManager.CombatState.END
 	combat_end.emit()
 
@@ -52,6 +46,9 @@ func get_current_combatant() -> Combatant:
 	return turn_order[current_turn]
 
 func next_turn():
+	if phase != StateManager.CombatState.ONGOING:
+		return
+	turn_number += 1
 	current_turn = (current_turn + 1) % turn_order.size()
 	while turn_order[current_turn].current_hp == 0:
 		current_turn = (current_turn + 1) % turn_order.size()
@@ -89,8 +86,15 @@ func get_targets_in_range(attacker: Combatant) -> Array[Combatant]:
 	)
 	return candidates
 
-func _check_victory():
-	for combatant:Combatant in turn_order:
-		if combatant is Enemy and combatant.current_hp > 0:
-			return
-	end()
+func _check_combat_end():
+	print_debug("Check combat end on combat_id=", combat_id, " self=", self)
+	var enemies_alive := 0
+	var players_alive := 0
+	for combatant in turn_order:
+		if combatant.current_hp > 0:
+			if combatant is Enemy:
+				enemies_alive += 1
+			elif combatant is Player :
+				players_alive +=1
+	if enemies_alive == 0 or players_alive == 0:
+		end()

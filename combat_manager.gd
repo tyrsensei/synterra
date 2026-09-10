@@ -11,6 +11,7 @@ var current_turn_combatant: Dictionary[int, Combatant] = {}
 var _next_combat_id := 0
 
 signal new_turn_received
+signal join_rejected
 
 # Only ran by server
 func handle_contact(player: Player, enemy: Enemy):
@@ -23,15 +24,15 @@ func handle_contact(player: Player, enemy: Enemy):
 		combat = get_combat(enemy.current_combat_id)
 		if combat.phase != StateManager.CombatState.PREP:
 			return
-		combat.add_participant(player)
+		combat.add_combatant(player)
 	else:
 		combat = Combat.new()
 		combat.turn_changed.connect(_on_turn_changed.bind(combat))
 		combat.combat_end.connect(_on_combat_ended.bind(combat))
 		combat.combat_id = _next_combat_id
 		_next_combat_id+=1
-		combat.add_enemy(enemy)
-		combat.add_participant(player)
+		combat.add_combatant(enemy)
+		combat.add_combatant(player)
 		currents.set(combat.combat_id, combat)
 		_start_combat_timer(combat)
 	
@@ -50,24 +51,32 @@ func _on_turn_changed(combatant: Combatant, combat: Combat):
 
 func _on_combat_ended(combat: Combat):
 	for combatant in combat.turn_order:
+		combatant.current_combat_id = -1
 		if combatant is Player:
 			StateManager.rpc(
 				"notify_state_changed",
 				combatant.get_meta("player_id"),
 				StateManager.PlayerState.EXPLORATION
 			)
+			combatant.current_hp = combatant.max_hp
+			rpc(
+				"notify_health_changed",
+				combatant.get_path(),
+				combatant.current_hp
+			)
 	currents.erase(combat.combat_id)
+	print_debug("Combat ", combat.combat_id, " refs: ", combat.get_reference_count())
 
 func _start_turn_timer(combat: Combat):
-	var saved_turn:= combat.current_turn
+	var saved_turn:= combat.turn_number
 	await get_tree().create_timer(15.0).timeout
-	if combat.current_turn == saved_turn:
+	if combat.turn_number == saved_turn:
 		combat.next_turn()
 
 func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 	await get_tree().create_timer(1.0).timeout
 	var players := combat.get_targets_in_range(enemy)
-	if players.size() == 0:
+	if players.size() > 0:
 		players[0].change_hp(-2)
 		rpc(
 			"notify_health_changed",
@@ -113,12 +122,13 @@ func request_action(combat_id: int, action: Action):
 func _handle_join(combat: Combat, combat_id: int, remote_id: int):
 	print_debug("join combat requested")
 	if combat.phase != StateManager.CombatState.PREP:
+		rpc_id(remote_id, "notify_join_rejected")
 		return
 	var player := StateManager.get_player_from_id(remote_id)
 	if not player or player.current_combat_id != -1:
 		return
 	var join_pos := combat.get_join_position()
-	combat.add_participant(player)
+	combat.add_combatant(player)
 	player.rpc_id(remote_id, "force_position", join_pos)
 	_notify_joined(player, combat_id, combat.phase)
 
@@ -181,3 +191,8 @@ func _notify_joined(player: Player, combat_id: int, combat_phase: StateManager.C
 @rpc("authority", "call_remote")
 func notify_action_rejected():
 	get_tree().call_group("cost_an_action", "set_disabled", false)
+
+@rpc("authority", "call_local")
+func notify_join_rejected():
+	join_rejected.emit()
+	

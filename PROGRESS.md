@@ -1309,11 +1309,39 @@ func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 - Style mineur noté, pas traité : `if players.size():` (vérité sur l'entier) au lieu du style `if ... .size() == 0:` déjà utilisé ailleurs — cosmétique, sans impact.
 - Reste du backlog inchangé : `is_player_turn()` à clarifier, fusion `StateManager`/`CombatManager`, bouton "Join" visible après `ONGOING`, repositionnement en `PREP`, anneau visuel au sol, arme neutre.
 
+## Session — Défaite (tous les joueurs morts) + série de bugs de fond révélés en testant ✅
+
+**Objectif de session** : fermer le trou identifié en fin de session précédente — si l'ennemi tue le dernier joueur vivant, `next_turn()` bouclait indéfiniment sur lui-même. Scope volontairement réduit dès le cadrage : reset HP complet + retour en `EXPLORATION` à la défaite, **pas de téléportation** — les checkpoints multiples appartiennent au sujet plus large du mode construction (à traiter dans sa propre session, voir "Idées notées pour plus tard").
+
+**Décisions actées avant code** :
+- `_check_victory()` généralisée en `_check_combat_end()` (`resources/combat.gd`) : une seule fonction vérifie les deux issues (`enemies_alive == 0` ou `players_alive == 0`), plutôt qu'un signal `combat_end(victory: bool)` séparé — cohérent avec le principe déjà appliqué ailleurs dans le projet (mutualiser plutôt que dupliquer une fonction symétrique).
+- Position du joueur à la défaite : autorité **client** (comme le mouvement), HP : autorité **serveur** (comme le reste du combat) — le critère retenu (`NETWORKING.md`) est "est-ce que le serveur a besoin de lire cette valeur pour décider quelque chose" : oui pour le HP (`next_turn`/`get_targets_in_range`/`_check_combat_end` en dépendent tous), non pour la position.
+
+**Code committé (`_on_combat_ended`, `combat_manager.gd`)** : boucle sur `turn_order`, reset `current_combat_id = -1` pour **tous** les combattants (pas seulement les joueurs — nouveau, corrige au passage un trou symétrique côté ennemi, voir plus bas), et pour les joueurs : état `EXPLORATION`, `current_hp = max_hp`, broadcast `notify_health_changed`.
+
+**Série de bugs trouvés en testant, tous corrigés et validés en réseau réel à 2 instances — le vrai contenu de cette session** :
+
+1. **Condition inversée dans `_handle_enemy_turn`** (`if players.size() == 0:` au lieu de `> 0`) — l'ennemi ne détectait jamais correctement ses cibles, symptôme repéré en testant la défaite mais sans rapport avec elle (régression antérieure, pas introduite cette session).
+2. **`enemy.current_combat_id` jamais réinitialisé à la fin d'un combat** — `_on_combat_ended()` ne traitait que les `Player`. Un joueur revenant dans la zone d'un ennemi après un combat terminé (pas de téléportation, cf. décision de scope) faisait planter `get_combat()` (`currents[combat_id]` sur un combat déjà retiré). Corrigé en traitant tous les combattants symétriquement dans `_on_combat_ended()`.
+3. **`next_turn()` sans garde sur `phase`** — une fois `end()` appelé, rien n'empêchait `_start_turn_timer` (filet de sécurité 15s) ni `_handle_enemy_turn` de continuer à faire tourner le combat : reconstitué avec le HP reset à la défaite (un joueur mort ressuscité en cours de résolution, avant l'appel de fin de fonction), ça créait des combats "fantômes" qui rejouaient des tours réels indéfiniment. Corrigé par `if phase != ONGOING: return` en tête de `next_turn()` — point de passage unique choisi plutôt que de garder chaque appelant individuellement.
+4. **Signal `died` jamais déconnecté** (`add_combatant()` connecte `combatant.died → _check_combat_end` mais rien ne l'enlève) — `Combat` est un `RefCounted` : cette connexion, jamais retirée, empêchait tout combat terminé d'être libéré (`get_reference_count()` : 15 à 23 après une fin de combat, jamais 0). Pire : la mort d'un joueur dans un combat en cours ré-déclenchait aussi les callbacks d'**anciens** combats de test (jamais nettoyés), qui évaluaient leur propre vieux `turn_order` et pouvaient conclure à tort à une fin de combat sans rapport. Corrigé en déconnectant `died` dans `end()`, symétrique à la connexion dans `add_combatant()`.
+5. **`_start_turn_timer` comparait `current_turn` (index cyclique, 0..N-1) plutôt qu'un identifiant unique de tour** — un timer de 15s programmé plusieurs tours plus tôt pouvait retomber sur le même index par simple coïncidence de modulo et forcer un tour prématuré, d'où des tours perçus comme durant 2-3s au lieu de 15s. Corrigé avec un compteur `turn_number` monotone sur `Combat`, incrémenté dans `next_turn()` (piège intermédiaire : la variable avait été ajoutée mais oubliée d'incrémenter au premier essai — le bug empirait alors, `turn_number` valant toujours 0 rendait la comparaison **systématiquement** vraie).
+6. **`pending_combat_id` (`game_ui.gd`) restait bloqué sur un ancien combat après un Join refusé** — un joueur rejeté (combat déjà `ONGOING`) n'était jamais ajouté au `turn_order` de ce combat, donc ne recevait jamais la notification de fin de combat qui aurait remis `pending_combat_id` à `-1`. Toute offre de combat suivante était alors silencieusement ignorée par le garde `pending_combat_id != combat_id`. Corrigé par une nouvelle RPC `notify_join_rejected` (même pattern que `notify_action_rejected`), reçue via un nouveau signal `CombatManager.join_rejected` écouté par `game_ui.gd`, qui réinitialise `pending_combat_id` et cache l'UI de Join.
+7. **Piège Godot sur cette même RPC** : `@rpc("authority", "call_remote")` ne s'exécute jamais si l'appelant et la cible (`remote_id`) sont la **même machine** — cas concret : le personnage du serveur lui-même se voit refuser un Join. `call_remote` exclut explicitement l'exécution locale, et il n'y a pas de "remote" distinct quand la cible est soi-même. Corrigé par un appel direct (`notify_join_rejected()`) quand `remote_id == 1`, RPC réservée au vrai cas distant.
+
+**Point de vigilance noté, pas encore reproduit** : `notify_action_rejected()` (attaque refusée) a exactement la même annotation `call_remote` — susceptible du même piège #7 si un jour c'est le personnage serveur lui-même dont l'attaque est refusée. Pas corrigé préventivement, à surveiller.
+
+**Pas fait / prochaine session :**
+- Téléportation vers un checkpoint à la défaite : explicitement hors scope, appartient au futur mode construction.
+- Rattrapage réseau tardif de `current_turn_combatant` : toujours ouvert, non bloquant (noté depuis plusieururs sessions).
+- Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
 2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session précédente) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. Rattrapage tardif de `current_turn_combatant` reste ouvert (non bloquant).
-3. ~~**IA basique de l'ennemi**~~ **Fait et validé** (session ci-dessus) : attaque si joueur à portée, sinon passe — confirmé en réseau réel. Déplacement/chase et gestion de la défaite restent ouverts (voir détail plus haut).
+3. ~~**IA basique de l'ennemi**~~ **Fait et validé** (session ci-dessus) : attaque si joueur à portée, sinon passe — confirmé en réseau réel. Déplacement/chase reste ouvert.
+3bis. ~~**Défaite (tous les joueurs morts)**~~ **Fait et validé** (session ci-dessus) — reset HP/état à la défaite, sans téléportation (hors scope, voir mode construction). A révélé et corrigé 7 bugs de fond en testant (détail plus haut) : détection ennemie, cleanup de fin de combat, boucle de tours fantômes, fuite mémoire sur `Combat`, timer de tour peu fiable, Join bloqué après rejet, piège RPC `call_remote` sur soi-même.
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session dédiée) — confirmé en réseau réel à 2 instances.
@@ -1321,6 +1349,8 @@ func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 8. `CombatManager.is_player_turn()` à clarifier/scinder (mélange "libre de bouger" et "mon tour de combat") — patché localement en session, pas résolu à la source.
 9. Fusion `StateManager`/`CombatManager` (double source de vérité "ce joueur est-il en combat ?") — identifiée en session, volontairement repoussée après les nettoyages rapides.
 10. Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING` — noté en session, pas traité.
+11. `notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7 ci-dessus, pas encore reproduit ni corrigé — à surveiller si le personnage serveur se voit un jour refuser une attaque.
+12. **`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**, même avec la déconnexion du signal `died` en place (bug #4) — encore une source de référence non identifiée. Les `print_debug` de diagnostic (`Check combat end on combat_id=...`, `Combat X refs: ...`) sont volontairement conservés dans le code pour investiguer ça à une prochaine session, plutôt que retirés maintenant que le comportement fonctionnel est validé.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
