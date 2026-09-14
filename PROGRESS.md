@@ -1336,6 +1336,151 @@ func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 - Rattrapage réseau tardif de `current_turn_combatant` : toujours ouvert, non bloquant (noté depuis plusieururs sessions).
 - Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
 
+## Session — Bouton "Join" visible après ONGOING + filtrage par combat_id de `new_turn_received` ✅
+
+**Objectif de session** : traiter dans l'ordre les petits incréments identifiés en fin de session précédente (#10 puis #11 de la liste "Prochaines étapes").
+
+**#10 — Bouton "Join" qui restait visible pour un spectateur après passage en `ONGOING` :**
+
+Diagnostic : au passage PREP → ONGOING (`Combat.start()` → `next_turn()`), le seul signal diffusé à tout le monde est `notify_turn_changed` (broadcast), déjà écouté côté UI via `_on_new_turn()`. Mais cette fonction ne cachait que `combat_prep_ui` (bouton Ready), jamais `combat_join_ui` (bouton Join) — d'où le bouton qui restait affiché indéfiniment pour un joueur qui n'avait pas rejoint à temps.
+
+Fix retenu (le plus stable des deux discutés) : cacher `combat_join_ui` **et** remettre `pending_combat_id = -1` dans `_on_new_turn()`, même pattern que `_on_join_rejected()`. Sans ce deuxième point, un spectateur qui rate la fenêtre de PREP restait avec un `pending_combat_id` obsolète, qui aurait fait ignorer silencieusement le **prochain** combat déclenché ailleurs sur la carte (`_on_new_combat` compare `pending_combat_id != combat_id`) — même classe de bug que le #6 déjà corrigé pour le cas "Join refusé".
+
+**Filtrage par `combat_id` de `new_turn_received`, traité dans la foulée** (le point explicitement noté en #10bis du backlog — signal global à tous les combats, pas filtré) :
+
+`new_turn_received` n'avait qu'un seul abonné (`game_ui.gd::_on_new_turn`), changement de signature sans risque ailleurs. Le `combat_id` existait déjà côté émission (`notify_turn_changed`), juste jeté avant d'arriver à l'UI.
+
+**Code committé** :
+```gdscript
+# combat_manager.gd
+signal new_turn_received(combat_id: int)
+...
+func notify_turn_changed(combat_id: int, combatant_path: NodePath):
+	...
+	new_turn_received.emit(combat_id)
+```
+```gdscript
+# ui/game_ui.gd
+func _on_new_turn(combat_id: int):
+	attack_used_this_turn = false
+	var player := _get_player()
+	if player and player.current_combat_id == combat_id:
+		var is_my_turn := CombatManager.is_player_turn(player)
+		get_tree().call_group("combat_ui", "set_disabled", !is_my_turn)
+		get_tree().call_group("combat_prep_ui", "hide")
+	if pending_combat_id == combat_id:
+		get_tree().call_group("combat_join_ui", "hide")
+		pending_combat_id = -1
+```
+`attack_used_this_turn = false` laissé inconditionnel (hors des deux `if`) — discuté en session, jugé sans conséquence tant que le bouton Attaque reste caché pour un joueur hors de ce combat.
+
+**Testé cette session, confirmé par Julien ✅** : bouton Join disparaît bien au passage en `ONGOING`, plus de faux positif entre combats non liés.
+
+**#11 — `notify_action_rejected()` : même piège `call_remote`/self-target que le #7 (Join rejeté) :**
+
+Vérification faite directement sur le code actuel plutôt que sur la description de session du fix #7 dans ce fichier, qui décrivait un correctif différent (appel direct conditionné à `remote_id == 1`) de ce qui est réellement en place aujourd'hui — le code fait foi : `notify_join_rejected()` est passée en `@rpc("authority", "call_local")` (pas `call_remote`), corrigeant le piège en s'assurant que l'appel s'exécute aussi localement quand l'appelant et la cible du `rpc_id()` sont la même machine (le personnage serveur qui se voit refuser un Join).
+
+`notify_action_rejected()` avait toujours `call_remote`, donc le même trou : un personnage serveur qui attaque sans ennemi à portée ne recevait jamais la réactivation de son bouton Attaque. Fix appliqué par symétrie directe — sans passer par une reproduction préalable du bug, décision actée en session (le pattern `call_local` étant déjà validé sur le cas jumeau) :
+```gdscript
+@rpc("authority", "call_local")
+func notify_action_rejected():
+	get_tree().call_group("cost_an_action", "set_disabled", false)
+```
+
+**Testé cette session, confirmé par Julien ✅** : personnage serveur, hors de portée d'un ennemi, clic Attaque en combat → bouton réactivé correctement.
+
+**Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous) — les deux incréments prévus pour cette session (#10, #11) sont clos.
+
+## Session — Clarification de `is_player_turn()` (#8) ✅
+
+**Objectif de session** : traiter le point noté depuis la revue de code combat — `CombatManager.is_player_turn()` mélangeait deux questions différentes ("suis-je libre de bouger" / "c'est mon tour de combat"), patché localement à l'époque plutôt que résolu à la source.
+
+**Diagnostic** : 3 appelants identifiés. `player.gd::_physics_process()` a réellement besoin de la sémantique combinée ("libre de bouger" = pas en combat, ou en combat et c'est mon tour). Les deux appels dans `game_ui.gd` (`_process()` et `_on_new_turn()`) sont désormais précédés d'un garde explicite `current_combat_id` — la branche "pas en combat" de l'ancienne fonction y était du code mort, le vrai besoin étant "c'est spécifiquement mon tour de combat".
+
+**Split retenu (`combat_manager.gd`)** :
+```gdscript
+func is_combat_turn(player: Player) -> bool:
+	return current_turn_combatant.get(player.current_combat_id) == player
+
+func can_move(player: Player) -> bool:
+	return player.current_combat_id == -1 or is_combat_turn(player)
+```
+`is_player_turn()` supprimée, pas de raison de la garder en compatibilité (aucun appelant externe). `player.gd` branché sur `can_move()`, `game_ui.gd` (les deux call sites) branché sur `is_combat_turn()`.
+
+**Régression introduite puis corrigée en deux temps — bouton Attaque cliquable en phase `PREP` :**
+
+1. **Premier bug** : `_process()` ([ui/game_ui.gd:16](ui/game_ui.gd:16)) branché sur `can_move()` au lieu de `is_combat_turn()` — mauvais choix entre les deux nouvelles fonctions. En `PREP`, le joueur est déjà en combat (`current_combat_id != -1`) mais aucun tour n'est encore assigné, donc `is_combat_turn()` vaut `false` et `can_move()` (qui vaut `current_combat_id == -1 or is_combat_turn(...)`) vaut donc `false` aussi → la fonction ne retournait plus tôt, et activait le bouton Attaque si un ennemi était à portée. Corrigé en revenant à `is_combat_turn()`, avec le garde explicite `player.current_combat_id == -1` remis devant (nécessaire : contrairement à l'ancienne `is_player_turn()`, `is_combat_turn()` ne gère pas le cas "pas en combat").
+2. **Deuxième bug, sur la correction elle-même** : le `not` manquant devant `CombatManager.is_combat_turn(player)` — la condition retournait (donc n'activait rien) quand c'était justement le tour du joueur, et continuait (activation du bouton) dans tous les autres cas, dont `PREP`. Même symptôme observé, cause différente. Corrigé en ajoutant le `not` manquant.
+
+**Testé cette session, confirmé par Julien ✅** : bouton Attaque bien grisé en phase `PREP`, plus de régression.
+
+**Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
+## Session — Fusion `StateManager`/`CombatManager` (#9) ✅
+
+**Objectif de session** : traiter le point structurant repoussé depuis la revue de code combat — les deux autoloads portaient chacun une partie de la vérité "ce joueur est-il en combat ?" (`PlayerState.FIGHT` d'un côté, `current_combat_id` de l'autre) et s'appelaient mutuellement.
+
+**Vérification faite avant de choisir une direction** : `player.state` (`PlayerState`) n'était en réalité **jamais lu** pour une décision — seulement écrit et renvoyé aux connexions tardives. Tout le code de gating (mouvement, UI) utilisait déjà `current_combat_id != -1`, jamais `player.state == FIGHT`. `PlayerState.BUILD` n'était référencé nulle part. Donc la "double source de vérité" était en réalité une donnée mémorisée à double, activement morte côté `FIGHT`/`EXPLORATION`.
+
+**Décision actée, en deux temps :**
+1. **Fusion complète dans `CombatManager`**, `current_combat_id` comme unique source de vérité, `state_manager.gd`/`PlayerState`/`get_states()`-via-state supprimés. Pas de couche `PlayerMode` générique conservée en prévision d'un futur `BuildManager` : Julien a précisé que le mode Build suivra les mêmes règles de déplacement que l'exploration (pas de gating façon combat) — donc pas un pair de `FIGHT`/`EXPLORATION` dans la même machine à états, plutôt un toggle indépendant côté serveur. Construire une abstraction commune maintenant, sur un seul cas concret (combat), aurait été deviner la forme d'un besoin qui n'est pas encore posé.
+2. **`get_player_from_id()` déplacé hors de `CombatManager`** (pas son scope, remarque de Julien) : discussion sur autoload générique vs méthode sur la classe. Pas de doctrine Godot tranchée là-dessus (les autoloads sont faits pour de l'état partagé/persistant ou un hub de signaux ; une fonction pure sans état n'en a pas vraiment besoin). Inquiétude de perf soulevée sur une alternative "groupe + filtre metadata" (`get_tree().get_nodes_in_group("players")` + `get_meta("player_id")`) — non fondée à l'échelle du projet (O(n) avec n = quelques joueurs, appel rare, négligeable face à la latence réseau), mais l'idée a mené à une meilleure solution : cache statique sur `Player`, maintenu par le cycle de vie du nœud.
+
+**Code committé (`scenes/player.gd`)** :
+```gdscript
+static var _by_id: Dictionary[int, Player] = {}
+var multiplayer_id: int
+
+func _enter_tree() -> void:
+	multiplayer_id = int(self.name.split("-")[1])
+	set_multiplayer_authority(multiplayer_id)
+	_by_id[multiplayer_id] = self
+
+func _exit_tree() -> void:
+	_by_id.erase(multiplayer_id)
+
+static func get_by_id(player_id) -> Player:
+	return _by_id.get(player_id)
+```
+Placé dans `_enter_tree()` comme `set_multiplayer_authority()` juste au-dessus, pour la même raison déjà établie : cette fonction s'exécute sur **toute** machine où le nœud entre dans l'arbre (spawn local ou réplication), donc le cache contient bien tous les joueurs (local + distants), pas seulement le sien. O(1) garanti, et plus de dépendance à un chemin de scène codé en dur (`"Players/Player-" + id`) — fragilité déjà rencontrée deux fois par le passé (piège `%unique_name` sur les nœuds spawnés dynamiquement, bug `get_node("../Enemies")`).
+
+**RPC `notify_state_changed` remplacée par `notify_combat_id_changed`** (`combat_manager.gd`) : ne porte plus de `new_state`, déduit `combat_started`/`combat_ended` par comparaison avant/après de `current_combat_id` plutôt que par un enum explicite :
+```gdscript
+@rpc("authority", "call_local")
+func notify_combat_id_changed(player_id: int, combat_id: int = -1, combat_phase: CombatState = CombatState.PREP):
+	var player := Player.get_by_id(player_id)
+	if not player:
+		return
+	var was_in_combat := player.current_combat_id != -1
+	player.current_combat_id = combat_id
+	if combat_id != -1 and combat_phase == CombatState.PREP:
+		new_combat_available.emit(combat_id)
+	if player_id == multiplayer.get_unique_id():
+		if combat_id != -1 and not was_in_combat:
+			combat_started.emit()
+		elif combat_id == -1 and was_in_combat:
+			combat_ended.emit()
+```
+
+**Bug trouvé en testant, corrigé — `combat_started` ne se déclenchait jamais quand c'est le personnage hôte qui rejoint/déclenche un combat, bouton "Join" restait visible après téléportation :**
+
+`Combat.add_combatant()` écrivait encore `combatant.current_combat_id = self.combat_id` **directement**, côté serveur, avant la diffusion de la RPC ci-dessus. Sans conséquence avec l'ancien design (basé sur un `new_state` explicite), mais empoisonne le nouveau calcul `was_in_combat` : sur le serveur, la RPC tourne aussi localement (`call_local`) — si le joueur concerné est le personnage du serveur lui-même, `was_in_combat` se calcule à partir d'un `current_combat_id` déjà pollué par l'écriture directe faite quelques lignes plus tôt, lit `true` au lieu de `false`, et la transition n'est jamais détectée. Un client distant n'est pas touché (`Combat` n'existe que côté serveur, jamais cette écriture directe locale chez lui) — d'où un bug qui ne se voyait que dans certains scénarios de test (hôte rejoignant/déclenchant).
+
+Corrigé en laissant la RPC être la **seule** à écrire `current_combat_id` pour un `Player` (elle le fait déjà de façon synchrone partout via `call_local`), l'écriture directe restant uniquement pour les `Enemy` (pas de RPC/signal équivalent pour eux) :
+```gdscript
+# resources/combat.gd
+func add_combatant(combatant: Combatant):
+	turn_order.append(combatant)
+	if combatant is not Player:
+		combatant.current_combat_id = self.combat_id
+	combatant.died.connect(_check_combat_end)
+```
+Même principe appliqué en fin de combat (`_on_combat_ended`, `combat_manager.gd`) : écriture directe retirée pour les `Player` (déjà couverte par la RPC juste après), gardée pour les `Enemy`. Au passage, `handle_contact()` a aussi été corrigé pour passer `combat.combat_id` (source directe et fiable) à `_notify_joined()` plutôt que de relire `player.current_combat_id`, qui dépendait du même effet de bord.
+
+**Testé cette session, en réseau réel, scénario complet confirmé par Julien ✅** : combat déclenché par contact, Join (hôte et client distant), Ready, Attaque, fin de combat, spectateur qui ne rejoint pas — rien de cassé par la fusion.
+
+**Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous) — #9 clos.
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
@@ -1346,10 +1491,10 @@ func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session dédiée) — confirmé en réseau réel à 2 instances.
 7. ~~**Revue de code combat + fiabilisation du bouton Attaque**~~ **Fait et validé** (session ci-dessus) — voir le détail complet plus haut.
-8. `CombatManager.is_player_turn()` à clarifier/scinder (mélange "libre de bouger" et "mon tour de combat") — patché localement en session, pas résolu à la source.
-9. Fusion `StateManager`/`CombatManager` (double source de vérité "ce joueur est-il en combat ?") — identifiée en session, volontairement repoussée après les nettoyages rapides.
-10. Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING` — noté en session, pas traité.
-11. `notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7 ci-dessus, pas encore reproduit ni corrigé — à surveiller si le personnage serveur se voit un jour refuser une attaque.
+8. ~~**`CombatManager.is_player_turn()` à clarifier/scinder**~~ **Fait et validé** (session ci-dessus) — scindée en `can_move()`/`is_combat_turn()`. A révélé 2 régressions en testant (mauvaise fonction branchée, puis `not` manquant), toutes deux corrigées.
+9. ~~**Fusion `StateManager`/`CombatManager`**~~ **Fait et validé** (session ci-dessus) — `current_combat_id` comme unique source de vérité, `PlayerState` supprimée (donnée morte). A révélé un bug de transition (`combat_started` ne se déclenchait pas pour l'hôte), corrigé.
+10. ~~**Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING`**~~ **Fait et validé** (session ci-dessus) — corrigé en même temps que le filtrage par `combat_id` de `new_turn_received` (signal auparavant global à tous les combats).
+11. ~~**`notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7**~~ **Fait et validé** (session ci-dessus) — passée en `call_local`, même correctif que `notify_join_rejected`.
 12. **`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**, même avec la déconnexion du signal `died` en place (bug #4) — encore une source de référence non identifiée. Les `print_debug` de diagnostic (`Check combat end on combat_id=...`, `Combat X refs: ...`) sont volontairement conservés dans le code pour investiguer ça à une prochaine session, plutôt que retirés maintenant que le comportement fonctionnel est validé.
 
 

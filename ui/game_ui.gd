@@ -7,15 +7,15 @@ var local_player: Player
 var attack_used_this_turn := false
 
 func _ready() -> void:
-	StateManager.combat_started.connect(_on_combat_started)
-	StateManager.combat_ended.connect(_on_combat_ended)
-	StateManager.new_combat_available.connect(_on_new_combat)
+	CombatManager.combat_started.connect(_on_combat_started)
+	CombatManager.combat_ended.connect(_on_combat_ended)
+	CombatManager.new_combat_available.connect(_on_new_combat)
 	CombatManager.new_turn_received.connect(_on_new_turn)
 	CombatManager.join_rejected.connect(_on_join_rejected)
 
 func _process(_delta: float) -> void:
 	var player := _get_player()
-	if not player or player.current_combat_id == -1 or not CombatManager.is_player_turn(player):
+	if not player or player.current_combat_id == -1 or not CombatManager.is_combat_turn(player):
 		return
 	get_tree().call_group(
 		"cost_an_action", "set_disabled",
@@ -28,7 +28,7 @@ func _on_join_rejected():
 
 func _get_player() -> Player:
 	if not local_player:
-		local_player = StateManager.get_player_from_id(multiplayer.get_unique_id())
+		local_player = Player.get_by_id(multiplayer.get_unique_id())
 	return local_player
 
 func _on_combat_started():
@@ -46,16 +46,17 @@ func _on_combat_ended():
 	tree.call_group("combat_prep_ui", "hide")
 	pending_combat_id = -1
 
-func _on_new_turn():
+func _on_new_turn(combat_id: int):
 	print_debug("UI new turn")
 	attack_used_this_turn = false
 	var player := _get_player()
-	if not player:
-		return
-	var is_my_turn:= CombatManager.is_player_turn(player)
-	var tree := get_tree()
-	tree.call_group("combat_ui", "set_disabled", !is_my_turn)
-	tree.call_group("combat_prep_ui", "hide")
+	if player and player.current_combat_id == combat_id:
+		var is_my_turn := CombatManager.is_combat_turn(player)
+		get_tree().call_group("combat_ui", "set_disabled", !is_my_turn)
+		get_tree().call_group("combat_prep_ui", "hide")
+	if pending_combat_id == combat_id:
+		get_tree().call_group("combat_join_ui", "hide")
+		pending_combat_id = -1
 	
 func _on_new_combat(combat_id: int):
 	print_debug("New combat received: ", combat_id)

@@ -9,7 +9,7 @@ var current_turn := -1
 var turn_number := 0
 var turn_order: Array[Combatant] = []
 var ready_players: Array[Player] = []
-var phase: StateManager.CombatState = StateManager.CombatState.PREP
+var phase: CombatManager.CombatState = CombatManager.CombatState.PREP
 
 signal combat_end
 signal turn_changed(combatant: Combatant)
@@ -23,7 +23,8 @@ func is_everyone_ready():
 
 func add_combatant(combatant: Combatant):
 	turn_order.append(combatant)
-	combatant.current_combat_id = self.combat_id
+	if combatant is not Player:
+		combatant.current_combat_id = self.combat_id
 	combatant.died.connect(_check_combat_end)
 
 func start():
@@ -33,20 +34,20 @@ func start():
 	)
 	for combatant in turn_order:
 		print_debug("Initiative: ", combatant.name, " -> ", combatant.initiative)
-	phase = StateManager.CombatState.ONGOING
+	phase = CombatManager.CombatState.ONGOING
 	next_turn()
 
 func end():
 	for combatant in turn_order:
 		combatant.died.disconnect(_check_combat_end)
-	phase = StateManager.CombatState.END
+	phase = CombatManager.CombatState.END
 	combat_end.emit()
 
 func get_current_combatant() -> Combatant:
 	return turn_order[current_turn]
 
 func next_turn():
-	if phase != StateManager.CombatState.ONGOING:
+	if phase != CombatManager.CombatState.ONGOING:
 		return
 	turn_number += 1
 	current_turn = (current_turn + 1) % turn_order.size()

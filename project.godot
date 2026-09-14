@@ -19,7 +19,6 @@ config/icon="res://icon.svg"
 
 NetworkManager="*uid://brpymu8uys1j2"
 SceneManager="*uid://cjriqgchrcrxa"
-StateManager="*uid://b1u716w1xlgk5"
 CombatManager="*uid://ci644oc2cqnb7"
 
 [display]

@@ -12,11 +12,17 @@ class_name Player
 
 var mouse_move_enabled := false
 var mouse_move := Vector2.ZERO
-var state: StateManager.PlayerState = StateManager.PlayerState.EXPLORATION
+
+static var _by_id: Dictionary[int, Player] = {}
+var multiplayer_id: int
 
 func _enter_tree() -> void:
-	var multiplayer_id:= int(self.name.split("-")[1])
+	multiplayer_id = int(self.name.split("-")[1])
 	set_multiplayer_authority(multiplayer_id)
+	_by_id[multiplayer_id] = self
+
+func _exit_tree() -> void:
+	_by_id.erase(multiplayer_id)
 
 func _ready() -> void:
 	super()
@@ -46,7 +52,7 @@ func _physics_process(delta: float) -> void:
 	mouse_move = Vector2.ZERO
 	
 	# Don't move if in combat and not my turn
-	if not CombatManager.is_player_turn(self):
+	if not CombatManager.can_move(self):
 		return
 	
 	var direction_input:= Input.get_vector("move_left", "move_right", "move_down", "move_up") * speed
@@ -81,3 +87,6 @@ func force_position(pos: Vector3):
 		return
 	global_position = pos
 	velocity = Vector3.ZERO
+
+static func get_by_id(player_id) -> Player:
+	return _by_id.get(player_id)
