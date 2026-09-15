@@ -126,6 +126,7 @@ func notify_combat_id_changed(
 	if player_id == multiplayer.get_unique_id():
 		if combat_id != -1 and not was_in_combat:
 			combat_started.emit()
+			player.reset_move()
 		elif combat_id == -1 and was_in_combat:
 			combat_ended.emit()
 
@@ -202,7 +203,11 @@ func is_combat_turn(player: Player) -> bool:
 	return current_turn_combatant.get(player.current_combat_id) == player
 
 func can_move(player: Player) -> bool:
-	return player.current_combat_id == -1 or is_combat_turn(player)
+	if player.current_combat_id == -1:
+		return true
+	if not current_turn_combatant.has(player.current_combat_id):
+		return true
+	return is_combat_turn(player)
 
 func _notify_joined(player: Player, combat_id: int, combat_phase: CombatState) -> void:
 	rpc(

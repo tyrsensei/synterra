@@ -1493,13 +1493,41 @@ Même principe appliqué en fin de combat (`_on_combat_ended`, `combat_manager.g
 
 **Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
 
+## Session — Déplacement des joueurs en phase `PREP` (#4) ✅
+
+**Objectif de session** : traiter le repositionnement des joueurs en `PREP`, en deux volets clarifiés par Julien en amont — (a) seul le clic "Join" doit téléporter/repositionner un rejoignant (déjà en place via `force_position`/`get_join_position()`, pas retouché cette session), (b) pendant la `PREP`, tous les joueurs déjà membres doivent pouvoir se déplacer, dans une zone donnée autour d'eux-mêmes (cercle par joueur, pas une zone partagée — décision actée avant de coder).
+
+**Bug trouvé en lisant le code avant d'implémenter** : le mouvement était en réalité **totalement bloqué** pendant toute la `PREP`, pas juste mal centré. `CombatManager.can_move()` ne renvoyait `true` que si c'était le tour du joueur (`is_combat_turn()`, qui lit `current_turn_combatant`) — cette table n'est remplie qu'à partir du tout premier `notify_turn_changed`, jamais émis avant la fin de la `PREP`. Trou déjà repéré et volontairement laissé de côté dans une session précédente ("Ordre de tour, socle").
+
+**Deux corrections apportées, la deuxième trouvée en testant en multi (la première ne suffisait pas) :**
+
+1. `can_move()` étendu pour autoriser le mouvement tant qu'aucun tour n'a encore été assigné pour ce combat — testé d'abord en lisant `CombatManager.currents.get(combat_id).phase == PREP`, **rejeté** après test réseau réel : `Combat`/`currents` n'existe et n'est peuplé **que côté serveur** (commentaire déjà présent en tête de `resources/combat.gd`), alors que `can_move()` tourne sur la machine ayant l'autorité du joueur concerné — le serveur pour son propre personnage (d'où un test solo/hôte qui semblait fonctionner), mais chaque client pour le sien (où `currents` est toujours vide). Corrigé en ne lisant plus que de la donnée répliquée :
+```gdscript
+func can_move(player: Player) -> bool:
+	if player.current_combat_id == -1:
+		return true
+	if not current_turn_combatant.has(player.current_combat_id):
+		return true
+	return is_combat_turn(player)
+```
+`current_turn_combatant.has(combat_id)` sert de proxy fiable à "la PREP est terminée" — l'entrée n'existe qu'à partir du premier `notify_turn_changed` (broadcast, `call_local`), reçu identiquement sur toutes les machines. Leçon générale ajoutée pour la suite : toute donnée lue par du code exécuté potentiellement côté client doit passer par de la donnée répliquée (RPC/signal), jamais par `currents`/`Combat` directement — cohérent avec l'arbre de décision de `NETWORKING.md`.
+
+2. `player.reset_move()` appelé dans `notify_combat_id_changed`, au moment de la transition vers un nouveau combat (`combat_id != -1 and not was_in_combat`, même garde que `combat_started.emit()`) — pour ancrer `move_center` sur la position réelle d'entrée en combat plutôt que sur le point de spawn (stale sinon, `move_center` n'étant posé qu'au `_ready()` du joueur ou lors d'un tour précédent).
+
+**Testé en réseau réel à 2 instances, confirmé par Julien ✅** : le joueur qui déclenche le combat par contact peut se déplacer en `PREP`, et le joueur qui rejoint via un client distant aussi (le point qui échouait avant le fix #1).
+
+**Pas fait / prochaine session :**
+- Rayon de la zone de déplacement en `PREP` : réutilise tel quel `move_max_distance` (5.0, pensé à l'origine pour un déplacement par tour) — pas de valeur dédiée, à ajuster si jugé trop restrictif à l'usage.
+- Repositionnement "en retrait par rapport à l'ennemi" pour un rejoignant (`get_join_position()`) : toujours purement aléatoire autour du centre des alliés, ne tient pas compte de la position de l'ennemi — pas retouché cette session.
+- Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
 2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session précédente) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. ~~Rattrapage tardif de `current_turn_combatant`~~ **Fait et validé** (session ci-dessus).
 3. ~~**IA basique de l'ennemi**~~ **Fait et validé** (session ci-dessus) : attaque si joueur à portée, sinon passe — confirmé en réseau réel. Déplacement/chase reste ouvert.
 3bis. ~~**Défaite (tous les joueurs morts)**~~ **Fait et validé** (session ci-dessus) — reset HP/état à la défaite, sans téléportation (hors scope, voir mode construction). A révélé et corrigé 7 bugs de fond en testant (détail plus haut) : détection ennemie, cleanup de fin de combat, boucle de tours fantômes, fuite mémoire sur `Combat`, timer de tour peu fiable, Join bloqué après rejet, piège RPC `call_remote` sur soi-même.
-4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.
+4. ~~**Repositionnement des joueurs pendant la phase `PREP`**~~ **Fait et validé** (session ci-dessus) — mouvement débloqué en `PREP` (bug trouvé : totalement bloqué avant, pas juste mal centré), cercle ancré sur la position réelle d'entrée en combat. Repositionnement "en retrait de l'ennemi" pour un rejoignant reste ouvert.
 5. Rappel toujours valable : `tests/test.tscn` reste volontairement serveur seul (`skip_scene_loading` + `create_server()` direct), le menu principal est le chemin pour tester en mode connecté — pas une lacune, ne plus rouvrir ce point.
 6. ~~**Bouton "Prêt" en phase `PREP`**~~ **Fait et validé** (session dédiée) — confirmé en réseau réel à 2 instances.
 7. ~~**Revue de code combat + fiabilisation du bouton Attaque**~~ **Fait et validé** (session ci-dessus) — voir le détail complet plus haut.
