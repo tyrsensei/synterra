@@ -1481,10 +1481,22 @@ Même principe appliqué en fin de combat (`_on_combat_ended`, `combat_manager.g
 
 **Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous) — #9 clos.
 
+## Session — Rattrapage tardif de `current_turn_combatant` ✅
+
+**Objectif de session** : fermer le point ouvert depuis plusieurs sessions — un client qui se connecte pendant qu'un combat est déjà `ONGOING` ne savait pas qui avait la main tant que le tour suivant n'arrivait pas (`current_turn_combatant` n'était alimenté que par le broadcast `notify_turn_changed`, jamais reçu par un client absent au moment de l'émission).
+
+**Fix retenu** : extension de `get_states()` (`combat_manager.gd`), déjà responsable du rattrapage de `current_combat_id`/`phase` à la connexion — pas de nouvelle architecture, réutilisation de `notify_turn_changed` en mode ciblé (`rpc_id`) plutôt qu'en broadcast, même principe que `notify_combat_id_changed`. Gardé strictement par `combat.phase == ONGOING` avant d'appeler `combat.get_current_combatant()`, pour éviter le piège déjà connu de `turn_order[-1]` (indexation négative GDScript) quand `current_turn` vaut encore `-1` en `PREP`.
+
+**Bug trouvé en revue (avant test), corrigé par Julien** : un premier essai avait fait glisser l'appel à `rpc_id(..., "notify_combat_id_changed", ...)` à l'intérieur du `if player.current_combat_id != -1:` — un joueur hors combat ne recevait alors plus aucun rattrapage du tout. Invisible en pratique (un `Player` fraîchement spawné côté nouveau client a déjà `current_combat_id == -1` par défaut, cf. `scenes/combatant.gd`), mais un rattrapage devenu implicite/dépendant d'une coïncidence de valeur par défaut plutôt qu'explicite — même classe de fragilité que d'autres bugs "fonctionne par accident" déjà rencontrés sur ce projet. Corrigé en ressortant l'appel du `if`, ne laissant que le nouveau bloc `notify_turn_changed` gardé par `combat.phase == ONGOING`.
+
+**Testé en réseau réel, confirmé par Julien ✅** : connexion d'un client pendant qu'un combat est `ONGOING` ailleurs sur la carte — le bon combattant a la main côté nouveau client sans attendre le tour suivant.
+
+**Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
-2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session précédente) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. Rattrapage tardif de `current_turn_combatant` reste ouvert (non bloquant).
+2. ~~**Fermeture de la boucle de combat**~~ **Fait et validé** (session précédente) : mort d'ennemi → victoire → fin de combat → joueurs libérés, confirmé en réseau réel. ~~Rattrapage tardif de `current_turn_combatant`~~ **Fait et validé** (session ci-dessus).
 3. ~~**IA basique de l'ennemi**~~ **Fait et validé** (session ci-dessus) : attaque si joueur à portée, sinon passe — confirmé en réseau réel. Déplacement/chase reste ouvert.
 3bis. ~~**Défaite (tous les joueurs morts)**~~ **Fait et validé** (session ci-dessus) — reset HP/état à la défaite, sans téléportation (hors scope, voir mode construction). A révélé et corrigé 7 bugs de fond en testant (détail plus haut) : détection ennemie, cleanup de fin de combat, boucle de tours fantômes, fuite mémoire sur `Combat`, timer de tour peu fiable, Join bloqué après rejet, piège RPC `call_remote` sur soi-même.
 4. Repositionnement des joueurs pendant la phase `PREP` — idée notée en session, pas encore de plan concret.

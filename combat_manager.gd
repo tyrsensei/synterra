@@ -228,6 +228,13 @@ func get_states(client_id: int):
 			var combat: Combat = currents.get(player.current_combat_id)
 			if combat:
 				combat_phase = combat.phase
+				if combat.phase == CombatState.ONGOING:
+					rpc_id(
+						client_id,
+						"notify_turn_changed",
+						combat.combat_id,
+						combat.get_current_combatant().get_path()
+					)
 		rpc_id(
 			client_id,
 			"notify_combat_id_changed",
