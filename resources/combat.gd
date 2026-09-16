@@ -4,6 +4,7 @@ extends RefCounted
 class_name Combat
 
 const JOIN_MARGIN := 2.0
+const JOIN_ANGLE_STEP := deg_to_rad(20.0)
 var combat_id: int
 var current_turn := -1
 var turn_number := 0
@@ -11,8 +12,8 @@ var turn_order: Array[Combatant] = []
 var ready_players: Array[Player] = []
 var phase: CombatManager.CombatState = CombatManager.CombatState.PREP
 
-signal combat_end
-signal turn_changed(combatant: Combatant)
+signal combat_end(combat: Combat)
+signal turn_changed(combat: Combat, combatant: Combatant)
 
 func is_everyone_ready():
 	for combatant in turn_order:
@@ -41,7 +42,7 @@ func end():
 	for combatant in turn_order:
 		combatant.died.disconnect(_check_combat_end)
 	phase = CombatManager.CombatState.END
-	combat_end.emit()
+	combat_end.emit(self)
 
 func get_current_combatant() -> Combatant:
 	return turn_order[current_turn]
@@ -54,19 +55,30 @@ func next_turn():
 	while turn_order[current_turn].current_hp == 0:
 		current_turn = (current_turn + 1) % turn_order.size()
 	turn_order[current_turn].action_used = false
-	turn_changed.emit(turn_order[current_turn])
+	turn_changed.emit(self, turn_order[current_turn])
 
 func get_join_position() -> Vector3:
-	var sum := Vector3.ZERO
+	var players_sum := Vector3.ZERO
 	var num_players := 0
+	var enemies_sum := Vector3.ZERO
+	var num_enemies := 0
 	for combatant in turn_order:
-		if combatant is not Player:
-			continue
-		sum += combatant.global_position
-		num_players+=1
-	var center := sum / num_players
-	var angle := randf() * TAU
-	return center + Vector3(cos(angle), 0, sin(angle)) * JOIN_MARGIN
+		if combatant is Player:
+			players_sum += combatant.global_position
+			num_players += 1
+		elif combatant is Enemy:
+			enemies_sum += combatant.global_position
+			num_enemies += 1
+	var players_center := players_sum / num_players
+	var enemies_center := enemies_sum / num_enemies
+	var retreat_direction := (players_center - enemies_center).normalized()
+
+	# zigzag : 0, +1, -1, +2, -2, +3, -3...
+	var step := int((num_players + 1.0) / 2)
+	var side := 1 if num_players % 2 == 1 else -1
+	var join_direction := retreat_direction.rotated(Vector3.UP, side * step * JOIN_ANGLE_STEP)
+
+	return players_center + join_direction * JOIN_MARGIN
 
 func get_targets_in_range(attacker: Combatant) -> Array[Combatant]:
 	var candidates: Array[Combatant] = []

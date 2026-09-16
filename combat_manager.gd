@@ -35,8 +35,8 @@ func handle_contact(player: Player, enemy: Enemy):
 		combat.add_combatant(player)
 	else:
 		combat = Combat.new()
-		combat.turn_changed.connect(_on_turn_changed.bind(combat))
-		combat.combat_end.connect(_on_combat_ended.bind(combat))
+		combat.turn_changed.connect(_on_turn_changed)
+		combat.combat_end.connect(_on_combat_ended)
 		combat.combat_id = _next_combat_id
 		_next_combat_id+=1
 		combat.add_combatant(enemy)
@@ -51,7 +51,7 @@ func _start_combat_timer(combat: Combat):
 	if combat.phase == CombatState.PREP:
 		combat.start()
 
-func _on_turn_changed(combatant: Combatant, combat: Combat):
+func _on_turn_changed(combat: Combat, combatant: Combatant):
 	_start_turn_timer(combat)
 	if combatant is Enemy:
 		_handle_enemy_turn(combat, combatant)
@@ -73,7 +73,7 @@ func _on_combat_ended(combat: Combat):
 		else:
 			combatant.current_combat_id = -1
 	currents.erase(combat.combat_id)
-	print_debug("Combat ", combat.combat_id, " refs: ", combat.get_reference_count())
+
 
 func _start_turn_timer(combat: Combat):
 	var saved_turn:= combat.turn_number

@@ -1518,8 +1518,95 @@ func can_move(player: Player) -> bool:
 
 **Pas fait / prochaine session :**
 - Rayon de la zone de déplacement en `PREP` : réutilise tel quel `move_max_distance` (5.0, pensé à l'origine pour un déplacement par tour) — pas de valeur dédiée, à ajuster si jugé trop restrictif à l'usage.
-- Repositionnement "en retrait par rapport à l'ennemi" pour un rejoignant (`get_join_position()`) : toujours purement aléatoire autour du centre des alliés, ne tient pas compte de la position de l'ennemi — pas retouché cette session.
+- ~~Repositionnement "en retrait par rapport à l'ennemi" pour un rejoignant~~ **Fait et validé** (session ci-dessous).
 - Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
+## Session — Repositionnement des rejoignants en éventail, à l'opposé de l'ennemi ✅
+
+**Objectif de session** : `get_join_position()` plaçait un rejoignant à un point purement aléatoire autour du centre des alliés, sans lien avec la position de l'ennemi. Objectif : le placer en retrait, du côté opposé à l'ennemi, sans que plusieurs rejoignants ne finissent les uns sur les autres — en anticipant des groupes de 4 à 8 joueurs (pas juste 2-3).
+
+**Décisions actées avant code :**
+- **Direction de repli = barycentre des ennemis → barycentre des alliés**, pas "le plus proche" : évite de devoir suivre quel ennemi a déclenché le combat (donnée non disponible), et généralise proprement à plusieurs ennemis si ça arrive un jour (actuellement un seul ennemi par combat, cas particulier trivial d'un barycentre à un seul point).
+- **Formation en éventail (arc à distance `JOIN_MARGIN` constante), pas une ligne** : une ligne perpendiculaire à l'axe de repli, décalée uniquement dans un sens, grandit sans limite avec le nombre de joueurs (dérive loin d'un côté à 8 joueurs). Un éventail centré sur l'axe de repli, avec une répartition en zigzag (`0°, +20°, -20°, +40°, -40°...`) de part et d'autre, reste compact et symétrique quel que soit le nombre de rejoignants.
+- **Pas de composante aléatoire** : positionnement entièrement déterministe (indexé sur `num_players`, le nombre d'alliés déjà présents avant ce rejoignant) — cohérent avec le choix déjà fait de garder `get_join_position()` simple.
+
+**Code committé (`resources/combat.gd`)** :
+```gdscript
+const JOIN_MARGIN := 2.0
+const JOIN_ANGLE_STEP := deg_to_rad(20.0)
+
+func get_join_position() -> Vector3:
+	var players_sum := Vector3.ZERO
+	var num_players := 0
+	var enemies_sum := Vector3.ZERO
+	var num_enemies := 0
+	for combatant in turn_order:
+		if combatant is Player:
+			players_sum += combatant.global_position
+			num_players += 1
+		elif combatant is Enemy:
+			enemies_sum += combatant.global_position
+			num_enemies += 1
+	var players_center := players_sum / num_players
+	var enemies_center := enemies_sum / num_enemies
+	var retreat_direction := (players_center - enemies_center).normalized()
+
+	# zigzag : 0, +1, -1, +2, -2, +3, -3...
+	var step := int((num_players + 1.0) / 2)
+	var side := 1 if num_players % 2 == 1 else -1
+	var join_direction := retreat_direction.rotated(Vector3.UP, side * step * JOIN_ANGLE_STEP)
+
+	return players_center + join_direction * JOIN_MARGIN
+```
+- `Vector3.rotated(axis, angle)` fait tourner `retreat_direction` autour de l'axe vertical pour obtenir chaque position de l'éventail — pas besoin de calculer un vecteur perpendiculaire séparé (`cross()`).
+- Position toujours calculée en lisant `global_position` au moment de l'appel (aucune valeur mise en cache) : couvre nativement le cas d'un allié qui se déplace en `PREP` juste avant qu'un autre rejoigne (point soulevé en session, déjà satisfait par construction — la fonction n'a jamais stocké de position, avant ou après ce changement).
+- Aucune garde sur `num_enemies == 0` : cette fonction n'est appelée que pendant un combat déjà démarré par un ennemi, invariant garanti par construction.
+
+**Testé cette session** : d'abord à 2 joueurs en réseau réel (ne couvre que le premier cran du zigzag), puis visuellement à 4 (capture d'écran, positions en éventail cohérentes, décalées de part et d'autre de l'axe opposé à l'ennemi) — confirmé par Julien. **Non testé à 5-8** (pas d'infrastructure de test pour simuler autant de joueurs sans vrai groupe) : `JOIN_ANGLE_STEP`/`JOIN_MARGIN` sont des valeurs de départ, à réajuster la première fois qu'un groupe complet joue réellement.
+
+**Pas fait / prochaine session :** reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
+
+## Session — Enquête sur la fuite de référence `Combat` (#12) — fausse alerte, corrigée quand même ✅
+
+**Objectif de session** : comprendre pourquoi `Combat.get_reference_count()` ne retombait jamais à 0 après la fin d'un combat (point ouvert depuis la session "Défaite", malgré la déconnexion du signal `died` déjà en place).
+
+**Hypothèse de départ (fausse, invalidée par le test) :** `handle_contact()` connectait les signaux propres à `Combat` avec `.bind(combat)` :
+```gdscript
+combat.turn_changed.connect(_on_turn_changed.bind(combat))
+combat.combat_end.connect(_on_combat_ended.bind(combat))
+```
+Un `Callable` lié (`.bind()`) qui capture l'objet sur lequel le signal est déclaré crée en théorie un auto-cycle de référence (`combat` → sa propre liste de connexions → `Callable` → `combat`), indétectable par un `RefCounted` (pas de ramasse-miettes à cycles dans Godot, contrairement à Python).
+
+**Invalidée par un test au `WeakRef` :** le premier diagnostic (`get_reference_count()` juste après la fin du combat) affichait `11`, redescendant à `1` après 35s d'attente — cohérent avec des coroutines de timer encore en vol (`_start_combat_timer` 30s, `_start_turn_timer` 15s par tour), mais **pas concluant sur une vraie fuite** : `get_reference_count()` appelé depuis une fonction qui a `combat` en paramètre ne peut structurellement jamais afficher 0, cet appel étant lui-même une référence vivante. Le vrai test (`weakref(combat)`, relâcher la référence locale, vérifier `weak.get_ref()` après 35s) a renvoyé `null` : **l'objet était bel et bien libéré, aucune fuite réelle**.
+
+**Leçon générale retenue** : `get_reference_count()` n'est fiable que mesuré depuis l'extérieur de l'objet ; mesuré depuis une méthode/fonction qui détient une référence au récepteur, il ne peut jamais tomber à 0 par construction — un `WeakRef` (relâcher toute référence forte connue, puis vérifier `weak.get_ref() == null`) est le seul test concluant pour prouver qu'un `RefCounted` a été réellement libéré.
+
+**Corrigé quand même, par prudence architecturale** : même si l'hypothèse du cycle était fausse ici, capturer l'objet émetteur via `.bind()` à la connexion reste une pratique fragile (dépend de détails d'implémentation non garantis). Remplacé par la transmission de `self` à l'émission plutôt qu'à la connexion — plus robuste, sans capture possible d'auto-référence :
+```gdscript
+# resources/combat.gd
+signal combat_end(combat: Combat)
+signal turn_changed(combat: Combat, combatant: Combatant)
+...
+func end():
+	...
+	combat_end.emit(self)
+
+func next_turn():
+	...
+	turn_changed.emit(self, turn_order[current_turn])
+```
+```gdscript
+# combat_manager.gd — handle_contact()
+combat.turn_changed.connect(_on_turn_changed)
+combat.combat_end.connect(_on_combat_ended)
+```
+`_on_turn_changed(combat, combatant)` / `_on_combat_ended(combat)` mis à jour en conséquence (un seul point de connexion pour chaque signal, vérifié par recherche globale — pas d'autre appelant à corriger).
+
+**Nettoyage** : `print_debug` de diagnostic (refcount, `_check_combat_end`) et le test `weakref` temporaire retirés.
+
+**Testé cette session, en réseau réel, confirmé par Julien ✅** : scénario complet (join, ready, tours, mort d'ennemi) inchangé après le changement de signature des signaux.
+
+**Pas fait / prochaine session :** #12 clos — aucune fuite réelle n'existait, correction appliquée par prudence. Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
 
 ## Prochaines étapes
 
@@ -1535,7 +1622,7 @@ func can_move(player: Player) -> bool:
 9. ~~**Fusion `StateManager`/`CombatManager`**~~ **Fait et validé** (session ci-dessus) — `current_combat_id` comme unique source de vérité, `PlayerState` supprimée (donnée morte). A révélé un bug de transition (`combat_started` ne se déclenchait pas pour l'hôte), corrigé.
 10. ~~**Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING`**~~ **Fait et validé** (session ci-dessus) — corrigé en même temps que le filtrage par `combat_id` de `new_turn_received` (signal auparavant global à tous les combats).
 11. ~~**`notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7**~~ **Fait et validé** (session ci-dessus) — passée en `call_local`, même correctif que `notify_join_rejected`.
-12. **`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**, même avec la déconnexion du signal `died` en place (bug #4) — encore une source de référence non identifiée. Les `print_debug` de diagnostic (`Check combat end on combat_id=...`, `Combat X refs: ...`) sont volontairement conservés dans le code pour investiguer ça à une prochaine session, plutôt que retirés maintenant que le comportement fonctionnel est validé.
+12. ~~**`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**~~ **Investigué et clos** (session ci-dessus) — fausse alerte (artefact de mesure, pas de vraie fuite, confirmé au `WeakRef`), `.bind()` auto-référent remplacé par transmission via `emit()` par prudence.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
