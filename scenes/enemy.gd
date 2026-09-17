@@ -2,7 +2,13 @@ extends Combatant
 
 class_name Enemy
 
+@export var definition: EnemyDefinition
+@onready var player_detector: CollisionShape3D = $PlayerDetector/CollisionShape3D
+
 func _ready() -> void:
+	max_hp = definition.max_hp
+	attack_range = definition.attack_range
+	(player_detector.shape as SphereShape3D).radius = definition.detection_radius
 	super()
 
 func _on_player_detector_body_entered(body: Node3D) -> void:

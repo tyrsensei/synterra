@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="EnemyDefinition" format=3 uid="uid://bgv0s41g3k64f"]
+
+[ext_resource type="Script" uid="uid://lwdnevrw52jg" path="res://resources/enemy_definition.gd" id="1_ikcjw"]
+
+[resource]
+script = ExtResource("1_ikcjw")
+attack_range = 5.0
+detection_radius = 1.5
+metadata/_custom_type_script = "uid://lwdnevrw52jg"
