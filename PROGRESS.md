@@ -1608,6 +1608,65 @@ combat.combat_end.connect(_on_combat_ended)
 
 **Pas fait / prochaine session :** #12 clos — aucune fuite réelle n'existait, correction appliquée par prudence. Reste du backlog inchangé (voir "Prochaines étapes" ci-dessous).
 
+## Session — Comportements d'ennemis par archétype (chase + resources), socle `EnemyDefinition` — en cours (#13)
+
+**Objectif de session** : partir du chase de l'ennemi (point ouvert depuis la session IA basique), reconnu en cours de route comme un sujet plus large — plusieurs ennemis auront des comportements différents (aller au contact, se cacher, fuir...), donc besoin d'un système de définition d'ennemi par resource plutôt que de coder un seul comportement en dur. Seul le socle "données fixes" (`EnemyDefinition`) a été posé et testé cette session — le chase lui-même et les archétypes de comportement restent à faire.
+
+**Décisions d'architecture actées (avant code, comme convenu) :**
+- **Comportement par composition (Resource), pas par héritage** de sous-classes d'`Enemy` (`MeleeEnemy`, `RangedEnemy`...) — choisi pour rester réutilisable/combinable entre archétypes sans dupliquer de scène/script par type, cohérent avec ce que `GAMEPLAY.md` anticipait déjà ("probablement porté par une future Resource par ennemi").
+- **`EnemyBehavior` en sous-resource imbriquée dans une resource de définition plus large** (`EnemyDefinition` : HP, rayon de détection, modèle 3D à terme, `behavior`), plutôt qu'une seule resource plate — pour permettre à plusieurs espèces d'ennemis (HP/modèle différents) de partager le même archétype de comportement sans dupliquer ses paramètres. Décision motivée par Julien : "il faudra des archétypes de comportement, comme il en faudra peut-être pour d'autres" — donc `EnemyBehavior` doit porter la **décision** elle-même (une méthode type `decide_action(enemy, combat)`), pas juste des paramètres lus en dur par `combat_manager.gd`, sinon `_handle_enemy_turn` accumulerait un `if`/`elif` par archétype au lieu de rester agnostique.
+- **Personnalisation d'instance (mode construction futur) hors de la resource** : la resource définit l'espèce/l'archétype (réutilisable, partagée entre plusieurs ennemis placés), la personnalisation par instance placée en niveau (position, éventuellement variations futures) ira dans le fichier de save du niveau, pas dans la `Resource` elle-même — cohérent avec la distinction déjà notée dans "Idées notées pour plus tard" (persistance de niveau).
+
+**Piège de nommage anticipé avant de coder** : `class_name Enemy` existe déjà (`scenes/enemy.gd`, scène). La nouvelle resource ne peut donc pas s'appeler `Enemy` — même famille de conflit que `States`/autoload (documenté plus haut, issue Godot #28187). Nom retenu : `EnemyDefinition`.
+
+**Code en cours (pas encore committé) :**
+
+`resources/enemy_definition.gd` :
+```gdscript
+extends Resource
+class_name EnemyDefinition
+
+@export var max_hp := 10
+@export var attack_range: float
+@export var detection_radius: float
+```
+Le champ `behavior: EnemyBehavior` (sous-resource d'archétype) **n'est pas encore ajouté** — seule la partie "données fixes" existe pour l'instant.
+
+`scenes/enemy.gd` — `Enemy` lit ses stats depuis sa `EnemyDefinition` à l'entrée en scène :
+```gdscript
+@export var definition: EnemyDefinition
+@onready var player_detector: CollisionShape3D = $PlayerDetector/CollisionShape3D
+
+func _ready() -> void:
+	max_hp = definition.max_hp
+	attack_range = definition.attack_range
+	(player_detector.shape as SphereShape3D).radius = definition.detection_radius
+	super()
+```
+**Point d'attention retenu, respecté ici** : `max_hp`/`attack_range` sont assignés **avant** l'appel à `super()` — `Combatant._ready()` fait `current_hp = max_hp`, donc lire la valeur de la resource après `super()` aurait initialisé les PV sur l'ancien défaut (`10`) au lieu de celui de la définition.
+
+Une première instance créée pour tester : `resources/test_enemy.tres`.
+
+**Bug trouvé en testant, corrigé — mais bug de donnée, pas de code :** `attack_range` semblait anormalement bas (ennemi attaquant seulement au contact quasi collé) malgré une valeur crue égale à l'ancien défaut (5.0). Vérification directe du `.tres` : la valeur réellement enregistrée était `1.5`, pas `5.0` — probablement une frappe non corrigée dans l'inspecteur, pas un souci d'ordre des champs (l'ordre du script et celui du `.tres` correspondent). Corrigé par Julien directement dans l'inspecteur.
+
+**Aparté pédagogique retenu pour la suite (échelle du monde) :**
+- Convention Godot : 1 unité 3D = 1 mètre (calibrage physique/gravité). Vérifié sur `player.tscn` : `CapsuleMesh`/`CapsuleShape3D` sans `height`/`radius` explicites → défauts Godot (hauteur 2.0, rayon 0.5), donc perso ≈ 2 m de haut, confirmant l'échelle. `attack_range`/`detection_radius`/`move_max_distance` sont donc bien déjà en mètres, à choisir en conséquence (une portée corps-à-corps réaliste tourne plutôt autour de 1,5-2 m, pas 5).
+- Juger une distance en mètres à l'œil sur un screenshot 3D en perspective n'est pas fiable : distorsion de perspective + caméra elle-même reculée de 5 m via `SpringArm3D` (posé lors de la session caméra) fausse l'intuition visuelle.
+- `distance_to()`/`global_position` mesure une distance **origine à origine**, pas bord de hitbox à bord de hitbox. Nuance apportée en session : l'origine du `CharacterBody3D` (`Player` comme `Enemy`) est calée sur les **pieds**, pas le centre géométrique (décision actée en session caméra) — sans incidence sur le calcul ici puisque les deux combattants sont au sol (écart en Y ~nul), mais distinction à garder en tête. L'écart visible entre les *surfaces* des deux capsules est donc `attack_range` moins le rayon de chacune (~0.5 m par défaut), légèrement inférieur au chiffre brut.
+- **Piste de vérification non tranchée** : `print_debug` temporaire de la distance réelle au moment de l'attaque (rapide, ponctuel) vs. sol en grille calibrée 1 m dans `tests/test.tscn` (plus lent à poser, réutilisable durablement pour juger portées/déplacements à l'œil par la suite). À trancher à la prochaine session si le besoin revient.
+
+**État des valeurs actuelles dans `test_enemy.tres` à la pause** : `attack_range = 5.0`, `detection_radius = 1.5`, `max_hp` par défaut (`10`, non surchargé). Noter que `detection_radius` est passé à `1.5` pendant la correction du bug ci-dessus — à confirmer avec Julien si c'est la valeur voulue ou un effet de bord du swap, avant de s'en servir pour trancher la taille des zones de détection des futurs archétypes.
+
+**Pas fait / prochaine session :**
+- `EnemyBehavior` (Resource, archétype de comportement) — pas encore créé. Premier archétype visé : "va au contact" (chase), avec une méthode de décision (`decide_action(enemy, combat)` ou équivalent) plutôt que de simples champs de paramètres.
+- Champ `behavior: EnemyBehavior` sur `EnemyDefinition` — pas encore ajouté (lien entre les deux resources).
+- `combat_manager.gd::_handle_enemy_turn` toujours en logique figée ("attaque si joueur à portée, sinon ne fait rien") — à faire déléguer la décision à `definition.behavior.decide_action(...)` une fois `EnemyBehavior` posé.
+- Le chase lui-même (déplacement de l'ennemi vers le joueur quand hors de portée d'attaque, pendant son tour) — objectif de départ de la session, pas encore codé.
+- Champ modèle 3D sur `EnemyDefinition` — pas encore ajouté (pas bloquant, lié au mode construction futur).
+- Confirmer la valeur de `detection_radius` (`1.5`) dans `test_enemy.tres` — voir note ci-dessus.
+- Rien de testé en réseau réel sur cette brique au-delà du câblage des champs fixes (HP/attack_range/detection_radius).
+- Rien encore committé (`enemy_definition.gd`, `enemy.gd`, `enemy.tscn`, `game.tscn`, `test_enemy.tres` modifiés/nouveaux, non stagés).
+
 ## Prochaines étapes
 
 1. ~~**Effet réel de l'action Attaque**~~ **Fait et validé** : `Action.ATTACK_WEAPON` applique les dégâts (`Combatant.change_hp()`), diffuse le nouveau HP par RPC (`notify_health_changed`, commit `8ea6123`) et affiche désormais une barre de vie (mesh billboard + shader) — confirmé en réseau réel à 2 instances.
@@ -1623,6 +1682,7 @@ combat.combat_end.connect(_on_combat_ended)
 10. ~~**Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING`**~~ **Fait et validé** (session ci-dessus) — corrigé en même temps que le filtrage par `combat_id` de `new_turn_received` (signal auparavant global à tous les combats).
 11. ~~**`notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7**~~ **Fait et validé** (session ci-dessus) — passée en `call_local`, même correctif que `notify_join_rejected`.
 12. ~~**`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**~~ **Investigué et clos** (session ci-dessus) — fausse alerte (artefact de mesure, pas de vraie fuite, confirmé au `WeakRef`), `.bind()` auto-référent remplacé par transmission via `emit()` par prudence.
+13. **Comportements d'ennemis par archétype (chase + `EnemyBehavior`/`EnemyDefinition`)** — en cours (session ci-dessus). Socle `EnemyDefinition` (HP/attack_range/detection_radius) posé et testé (pas encore committé). Reste : `EnemyBehavior` (resource d'archétype avec méthode de décision), branchement sur `combat_manager.gd::_handle_enemy_turn`, et le chase lui-même — pas encore codés.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
