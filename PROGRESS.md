@@ -1665,7 +1665,116 @@ Une première instance créée pour tester : `resources/test_enemy.tres`.
 - Champ modèle 3D sur `EnemyDefinition` — pas encore ajouté (pas bloquant, lié au mode construction futur).
 - Confirmer la valeur de `detection_radius` (`1.5`) dans `test_enemy.tres` — voir note ci-dessus.
 - Rien de testé en réseau réel sur cette brique au-delà du câblage des champs fixes (HP/attack_range/detection_radius).
-- Rien encore committé (`enemy_definition.gd`, `enemy.gd`, `enemy.tscn`, `game.tscn`, `test_enemy.tres` modifiés/nouveaux, non stagés).
+- ~~Rien encore committé~~ **Committé depuis** (`7a51ae1`, session suivante).
+
+## Session — Format `CombatAction` unifié (joueur/ennemi), socle avant le chase ✅
+
+**Objectif de session** : poser les fondations du chase (#13, comportements d'ennemis par archétype), en clarifiant d'abord un point de design soulevé par Julien avant d'écrire la moindre ligne — le chase seul n'a pas été codé cette session, tout le temps est passé sur le socle de représentation d'une action de combat.
+
+**Point de départ** : proposition initiale de `decide_action(enemy, combat) -> bool` (juste "à portée ou pas"), avec l'attaque toujours résolue en dur dans `combat_manager.gd` (cible/dégâts fixes). **Rejeté par Julien**, à juste titre : ça réintroduisait l'anti-pattern déjà écarté à la session "CombatManager, socle" (`_handle_enemy_turn` qui accumulerait un `if`/`elif` par archétype) — le comportement doit décider la cible *et* le type d'action (attaque mêlée/distance, cible le soigneur, sort défensif...), pas juste si l'ennemi est à portée.
+
+**Décision retenue — un format de résultat d'action partagé, pas propre aux ennemis :**
+
+Julien a poussé plus loin : puisque la résolution côté serveur est structurellement la même pour un joueur et un ennemi (appliquer un delta de HP, un état, diffuser en RPC), autant unifier le **format du résultat décidé**, pas seulement en interne à `EnemyBehavior`. Nuance importante actée en discussion : ça ne remet **pas** en cause l'autorité serveur ni le protocole réseau existant — `CombatManager.Action` (`READY`/`JOIN_COMBAT`/`END_TURN`/`ATTACK_WEAPON`, ce qu'un *client a le droit de demander*, validé côté serveur) reste inchangé. `CombatAction` est un objet différent : le **résultat déjà résolu** d'une décision (côté joueur *après* validation serveur, côté ennemi directement depuis l'IA), jamais transmis sur le réseau lui-même.
+
+**Code committé (`b704767`)** :
+
+`resources/combat_action.gd` — `RefCounted` (pas une `Resource` : objet éphémère recalculé à chaque tour, jamais sauvegardé/édité dans l'inspecteur, même raisonnement que `Combat`) :
+```gdscript
+extends RefCounted
+class_name CombatAction
+
+enum Kind { NONE, ATTACK, DEFEND, HEAL }
+enum Effect { NONE, SLOW, STUN, BURN, POISON }
+
+var kind: Kind = Kind.NONE
+var effect: Effect = Effect.NONE
+var effect_nb_turn: int = 0
+var target: Combatant = null
+var hp_amount: int = 0
+
+static func attack(target: Combatant, hp_amount: int) -> CombatAction:
+	var action := CombatAction.new()
+	action.kind = Kind.ATTACK
+	action.target = target
+	action.hp_amount = hp_amount
+	return action
+```
+`Effect`/`effect_nb_turn`/`HEAL` ajoutés directement par Julien, au-delà de ce qui avait été discuté en session (qui ne couvrait que `kind`/`target`/`amount` pour `ATTACK`/`DEFEND`) — cohérent avec l'objectif "extensible dès maintenant", à valider/affiner à l'usage quand un premier cas `HEAL`/`Effect` sera réellement implémenté.
+
+**Construction en un-liner — méthode statique factory par `Kind` retenue**, plutôt qu'un `_init()` générique à paramètres positionnels : discuté en session, deux options comparées (constructeur unique vs factory par `Kind`). Factory choisie pour rester extensible sans champs inutiles/ambigus selon le `Kind` (`DEFEND` n'aura pas forcément de `target`, par exemple) et un appel auto-documenté (`CombatAction.attack(target, amount)`) plutôt que des arguments positionnels à retenir.
+
+**Cibles multiples (AoE) — tranché en discussion, pas encore un besoin concret** : décision actée de garder `target: Combatant` singulier, et de représenter un effet à cibles multiples par **plusieurs `CombatAction`** (une par cible) plutôt qu'un champ `targets: Array`. Raison : `notify_health_changed` est de toute façon un RPC par combattant (état répliqué individuel) — regrouper en un seul objet ne simplifierait rien côté réseau, juste de la cérémonie supplémentaire pour le cas single-target (très largement majoritaire aujourd'hui). Si un jour un besoin d'atomicité par cast (un seul VFX/résultat de jet pour toute une zone) apparaît, ce sera un concept séparé (ex. un "Cast" regroupant plusieurs `CombatAction`), pas une extension de `CombatAction` lui-même — pas anticipé avant un cas réel.
+
+**Refactor immédiat du chemin joueur, à la demande de Julien** ("je préfère partir dans la bonne direction... la codebase est déjà assez complexe") : plutôt que de brancher `CombatAction` uniquement côté ennemi et migrer le joueur plus tard, les deux chemins existants (`_handle_combat_action::ATTACK_WEAPON` et `_handle_enemy_turn`) construisent désormais un `CombatAction` et appellent la même fonction d'exécution :
+
+```gdscript
+func _resolve_action(action: CombatAction) -> void:
+	match action.kind:
+		CombatAction.Kind.ATTACK:
+			action.target.change_hp(action.hp_amount)
+			rpc(
+				"notify_health_changed",
+				action.target.get_path(),
+				action.target.current_hp
+			)
+		CombatAction.Kind.DEFEND:
+			pass
+		CombatAction.Kind.HEAL:
+			pass
+		CombatAction.Kind.NONE:
+			pass
+```
+**Frontière volontaire retenue** : la validation (y a-t-il une cible ? le joueur a-t-il déjà agi ?) reste spécifique à chaque appelant (rejet RPC dédié côté joueur via `notify_action_rejected`, simple `Kind.NONE` à venir côté ennemi) — seule l'**exécution** de l'effet déjà décidé est unifiée dans `_resolve_action`.
+
+**Bug de duplication trouvé en relisant le diff avant de committer, corrigé par Julien avant test final** : première version de la migration centralisait bien `change_hp()` dans `_resolve_action`, mais laissait le `rpc("notify_health_changed", ...)` dupliqué tel quel dans les deux appelants au lieu de le rapatrier dans `_resolve_action` — la partie "diffusion réseau" (justement l'argument donné pour unifier le format) restait non centralisée. Corrigé : les deux appelants ne font plus que construire un `CombatAction` et appeler `_resolve_action`, plus aucun `rpc()`/`change_hp()` en dehors de cette fonction.
+
+**Testé en réseau réel à 2 instances, confirmé par Julien ✅** : attaque joueur et attaque ennemi appliquent les mêmes dégâts qu'avant le refactor (comportement de jeu inchangé, seul le chemin interne a changé).
+
+**Pas fait / prochaine session** :
+- Le chase lui-même toujours pas codé — objectif de départ de cette session, entièrement reporté au profit du socle `CombatAction`.
+- `EnemyBehavior` (Resource, archétype avec `decide_action(enemy, combat) -> CombatAction`) — design discuté (voir ci-dessous) mais pas encore créé.
+- Design retenu pour la suite, à implémenter :
+  - `EnemyBehavior.decide_action(enemy, combat) -> CombatAction` (async) gère le chase en interne et renvoie directement un `CombatAction` tout fait — `_handle_enemy_turn` n'aura plus qu'à faire `var result := await enemy.definition.behavior.decide_action(enemy, combat); _resolve_action(result); combat.next_turn()`.
+  - Déplacement physique du chase : pattern "capture/décision d'un côté, exécution physique de l'autre" déjà utilisé pour la rotation caméra (`_input` accumule / `_physics_process` consomme) — `decide_action` pose une cible de chase (ex. `enemy.chase_target`) et attend l'arrivée/un timeout, `Enemy._physics_process` (déjà présent pour la gravité) lit cette cible et fait le déplacement via `move_and_slide()`. Un seul point d'appel à `move_and_slide()`, pas de `move_and_slide()` appelé depuis une coroutine désynchronisée du tick physique.
+  - Contrainte "ne doit pas pousser les joueurs" (demandée par Julien) : a priori déjà satisfaite par défaut — deux `CharacterBody3D` en collision ne se poussent pas l'un l'autre (cinématique, pas de réaction physique comme un `RigidBody3D`), seul le déplacement du corps qui bouge est freiné/glissé. **À vérifier empiriquement en testant**, pas juste supposer sur la doc (même réflexe que pour le timing RPC/`find_child` documentés plus haut).
+  - Helper à ajouter sur `Combat` : un `get_nearest_opponent(attacker)` (symétrique à `get_targets_in_range`, sans filtre de portée) pour savoir vers où chasser — n'existe pas encore.
+  - Champ `behavior: EnemyBehavior` sur `EnemyDefinition` — toujours pas ajouté.
+  - Les joueurs ne peuvent pas bouger pendant le tour de l'ennemi (`can_move()` bloque tout le monde sauf le combattant actif) — donc la cible du chase est fixe le temps du tour, pas besoin de re-cibler en continu pendant la boucle.
+  - Rien de testé en réseau réel sur le chase (logique normal, pas encore codé).
+
+## Session — Moteur de règles d'ennemi (`CombatRule` / `RuleEntry`), sans chase ✅
+
+**Objectif de session** : démarré sur le chase, devenu la construction d'un système de comportement piloté par la donnée. Le chase lui-même n'est **pas** codé — voir "Pas fait".
+
+**Design partagé avant le code** : Julien a demandé à pouvoir composer des comportements d'ennemis sans recoder chaque archétype (référence : le système de Gambits de FFXII, "attaque si PV > 70 %, soigne si PV < 30 %", liste ordonnée condition → action, première règle qui matche). Terme FFXII écarté au profit de **`CombatRule`**, cohérent avec `Combat`/`CombatAction`/`CombatManager`. Deux approches comparées : petites classes `Resource` typées par condition/action (A) contre une condition générique pilotée par des enums `field`/`operator`/`value` (B). Julien a construit pas à pas une version simplifiée de A pour comprendre, en fusionnant condition et action dans une seule classe.
+
+**Décisions actées :**
+- **Pas de `EnemyBehavior` intermédiaire** : proposé puis abandonné à la demande de Julien. La liste ordonnée `rules: Array[RuleEntry]` vit directement sur `EnemyDefinition`, qui porte aussi `decide_action()`. La réutilisation entre espèces se fait au niveau des `.tres` de règles (le même `AttackNearestRule.tres` peut être glissé dans la liste de plusieurs ennemis), pas via un paquet de comportement partagé.
+- **`RuleEntry` (règle + valeur) plutôt qu'une valeur portée par la règle** : chaque entrée de la liste a un champ `rule` et un champ `value`, propres à l'ennemi. Le but est d'équilibrer les valeurs par ennemi directement dans l'inspecteur, sans un `.tres` par valeur. Écarté : des champs de seuil nommés sur `EnemyDefinition`, qui l'auraient recouplée aux règles utilisées.
+- **Limite connue** : un seul `value: float` générique par entrée. Le jour où une règle demandera deux nombres (ex. "soigne de X si PV < Y %"), il faudra un `Array[float]` ou des champs spécifiques à cette règle.
+- **Signes des dégâts** : `CombatAction.hp_amount` est une magnitude **positive**, `_resolve_action` applique `change_hp(-action.hp_amount)`. (Le commit `b704767` les avait encore négatifs : Julien a changé la convention ensuite, j'ai relu à tort un diff périmé.)
+- **`attack_damage`** vit sur `EnemyDefinition`, à côté de `attack_range` : c'est une donnée d'espèce, pas de règle.
+
+**Code committé (`c6ca741`)** :
+- `resources/rules/combat_rule.gd` : base `Resource`, `matches(enemy, combat, value) -> bool` (vrai par défaut) et `decide(enemy, combat, value) -> CombatAction`.
+- `resources/rules/attack_nearest_rule.gd` : attaque l'adversaire le plus proche, ignore `value` (`_value`).
+- `resources/rules/rule_entry.gd` : `@export var rule: CombatRule` et `@export var value: float`.
+- `resources/enemy_definition.gd` : `attack_damage`, `rules`, et `decide_action()` (première règle qui matche gagne, `CombatAction.new()` = `Kind.NONE` si aucune).
+- `resources/combat.gd` : `get_nearest_opponent()` et `is_valid_opponent()`. Julien a factorisé ce dernier au lieu de dupliquer le filtre, ce que j'avais jugé prématuré ; équivalence booléenne vérifiée (De Morgan), aucune régression.
+- `combat_manager.gd::_handle_enemy_turn` délègue à `enemy.definition.decide_action()` puis `_resolve_action()`.
+- `resources/test_enemy.tres` : une entrée `AttackNearestRule`, `attack_damage = 2`.
+
+**Piège rencontré** : la signature d'une méthode surchargée doit reprendre les paramètres de la classe de base. `AttackNearestRule.decide()` était restée à 2 paramètres alors que l'appelant en passe 3 : erreur de signature à l'analyse, et plantage à l'exécution.
+
+**Testé en réseau réel à 2 instances, confirmé par Julien ✅** : même comportement que l'ancien code (l'ennemi inflige 2 dégâts), désormais piloté par la donnée.
+
+**Pas fait / prochaine session :**
+- **Le chase** (objectif de départ). Comportement actuel à connaître : `AttackNearestRule` cible l'adversaire le plus proche **sans regarder la portée**, donc l'ennemi peut frapper à distance. Le garde-fou "attaque seulement si un joueur est à portée" de l'ancien code a disparu.
+- Design à trancher : je recommande de mettre l'étape "aller à portée avant d'agir" dans `EnemyDefinition.decide_action`, générique et appliquée après le choix de la règle (les règles restent de pures décisions), plutôt que dans chaque règle. Déplacement physique prévu : `decide_action` pose un `chase_target` sur l'ennemi et attend l'arrivée ou un timeout, `Enemy._physics_process` exécute le déplacement via `move_and_slide()`. `decide_action` deviendra alors `async`.
+- Exigence de Julien : l'ennemi ne doit pas pousser les joueurs. A priori satisfait par défaut (deux `CharacterBody3D` ne se poussent pas), **à vérifier en test**.
+- Les joueurs ne peuvent pas bouger pendant le tour de l'ennemi : la cible du chase est fixe le temps du tour.
+- Règles plus riches (seuils de PV, soin) : non commencées, elles poseront la question de la limite du `value` unique.
 
 ## Prochaines étapes
 
@@ -1682,7 +1791,7 @@ Une première instance créée pour tester : `resources/test_enemy.tres`.
 10. ~~**Bouton "Join" qui reste visible pour un spectateur après passage en `ONGOING`**~~ **Fait et validé** (session ci-dessus) — corrigé en même temps que le filtrage par `combat_id` de `new_turn_received` (signal auparavant global à tous les combats).
 11. ~~**`notify_action_rejected()` : même piège RPC `call_remote`/self-target que le #7**~~ **Fait et validé** (session ci-dessus) — passée en `call_local`, même correctif que `notify_join_rejected`.
 12. ~~**`Combat.get_reference_count()` ne retombe toujours pas à 0 après la fin d'un combat**~~ **Investigué et clos** (session ci-dessus) — fausse alerte (artefact de mesure, pas de vraie fuite, confirmé au `WeakRef`), `.bind()` auto-référent remplacé par transmission via `emit()` par prudence.
-13. **Comportements d'ennemis par archétype (chase + `EnemyBehavior`/`EnemyDefinition`)** — en cours (session ci-dessus). Socle `EnemyDefinition` (HP/attack_range/detection_radius) posé et testé (pas encore committé). Reste : `EnemyBehavior` (resource d'archétype avec méthode de décision), branchement sur `combat_manager.gd::_handle_enemy_turn`, et le chase lui-même — pas encore codés.
+13. **Comportements d'ennemis par archétype (chase + `EnemyBehavior`/`EnemyDefinition`)** — en cours. Socle `EnemyDefinition` (HP/attack_range/detection_radius) **fait et committé**. Socle `CombatAction` (format unifié de résultat d'action, joueur/ennemi) **fait, testé en réseau et committé** (session ci-dessus, `b704767`) — voir détail complet plus haut, design du chase entièrement arrêté. Moteur de règles (`CombatRule`/`RuleEntry`/`AttackNearestRule`, `EnemyDefinition.rules`, `get_nearest_opponent()`) **fait, testé en réseau et committé** (`c6ca741`, session ci-dessus) — `EnemyBehavior` abandonné au profit de `rules` directement sur `EnemyDefinition`. Reste à coder : le chase (étape "aller à portée" dans `decide_action`, `chase_target` + `Enemy._physics_process`), pas encore commencé.
 
 
 ## Idées notées pour plus tard (hors scope immédiat)
