@@ -85,12 +85,8 @@ func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 	await get_tree().create_timer(1.0).timeout
 	var players := combat.get_targets_in_range(enemy)
 	if players.size() > 0:
-		players[0].change_hp(-2)
-		rpc(
-			"notify_health_changed",
-			players[0].get_path(),
-			players[0].current_hp
-		)
+		var attack_action := CombatAction.attack(players[0], -2)
+		_resolve_action(attack_action)
 	combat.next_turn()
 
 @rpc("authority", "call_local")
@@ -192,8 +188,8 @@ func _handle_combat_action(combat: Combat, remote_id: int, action: Action):
 			if enemies.size() == 0:
 				rpc_id(remote_id, "notify_action_rejected")
 				return
-			enemies[0].change_hp(-5)
-			rpc("notify_health_changed", enemies[0].get_path(), enemies[0].current_hp)
+			var attack_action := CombatAction.attack(enemies[0], -5)
+			_resolve_action(attack_action)
 			combatant.action_used = true
 
 func get_combat(combat_id: int) -> Combat:
@@ -247,3 +243,20 @@ func get_states(client_id: int):
 			player.current_combat_id,
 			combat_phase
 		)
+
+func _resolve_action(action: CombatAction) -> void:
+	match action.kind:
+		CombatAction.Kind.ATTACK:
+			action.target.change_hp(action.hp_amount)
+			rpc(
+				"notify_health_changed",
+				action.target.get_path(),
+				action.target.current_hp
+			)
+			pass
+		CombatAction.Kind.DEFEND:
+			pass
+		CombatAction.Kind.HEAL:
+			pass
+		CombatAction.Kind.NONE:
+			pass
