@@ -83,10 +83,8 @@ func _start_turn_timer(combat: Combat):
 
 func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 	await get_tree().create_timer(1.0).timeout
-	var players := combat.get_targets_in_range(enemy)
-	if players.size() > 0:
-		var attack_action := CombatAction.attack(players[0], -2)
-		_resolve_action(attack_action)
+	var action := enemy.definition.decide_action(enemy, combat)
+	_resolve_action(action)
 	combat.next_turn()
 
 @rpc("authority", "call_local")
@@ -188,7 +186,7 @@ func _handle_combat_action(combat: Combat, remote_id: int, action: Action):
 			if enemies.size() == 0:
 				rpc_id(remote_id, "notify_action_rejected")
 				return
-			var attack_action := CombatAction.attack(enemies[0], -5)
+			var attack_action := CombatAction.attack(enemies[0], 5)
 			_resolve_action(attack_action)
 			combatant.action_used = true
 
@@ -247,7 +245,7 @@ func get_states(client_id: int):
 func _resolve_action(action: CombatAction) -> void:
 	match action.kind:
 		CombatAction.Kind.ATTACK:
-			action.target.change_hp(action.hp_amount)
+			action.target.change_hp(-action.hp_amount)
 			rpc(
 				"notify_health_changed",
 				action.target.get_path(),

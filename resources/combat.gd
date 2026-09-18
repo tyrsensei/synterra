@@ -83,11 +83,7 @@ func get_join_position() -> Vector3:
 func get_targets_in_range(attacker: Combatant) -> Array[Combatant]:
 	var candidates: Array[Combatant] = []
 	for combatant in turn_order:
-		var is_opponent := (
-			(attacker is Player and combatant is Enemy)
-			or (attacker is Enemy and combatant is Player)
-		)
-		if not is_opponent or combatant.current_hp <= 0:
+		if not is_valid_opponent(attacker, combatant):
 			continue
 		if attacker.global_position.distance_to(combatant.global_position) <= attacker.attack_range:
 			candidates.append(combatant)
@@ -111,3 +107,22 @@ func _check_combat_end():
 				players_alive +=1
 	if enemies_alive == 0 or players_alive == 0:
 		end()
+
+func get_nearest_opponent(attacker: Combatant) -> Combatant:
+	var nearest: Combatant = null
+	var nearest_distance := INF
+	for combatant in turn_order:
+		if not is_valid_opponent(attacker, combatant):
+			continue
+		var distance := attacker.global_position.distance_to(combatant.global_position)
+		if distance < nearest_distance:
+			nearest = combatant
+			nearest_distance = distance
+	return nearest
+
+func is_valid_opponent(attacker: Combatant, defender: Combatant) -> bool:
+	var is_opponent := (
+		(attacker is Player and defender is Enemy)
+		or (attacker is Enemy and defender is Player)
+	)
+	return is_opponent and defender.current_hp > 0
