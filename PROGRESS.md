@@ -1798,9 +1798,54 @@ func _resolve_action(action: CombatAction) -> void:
 **Testé en réseau réel à 2 instances, confirmé par Julien ✅** : chase fonctionnel, plus de ré-attaque en boucle, plus de gel de tour.
 
 **Pas fait / prochaine session :**
-- `AttackNearestRule.matches()` ne protège pas contre un `get_nearest_opponent()` renvoyant `null` (contrairement à `ChaseNearestRule.matches()`, qui le fait) — en pratique `_check_combat_end()` devrait toujours avoir mis fin au combat avant qu'un tel cas se présente, donc pas un bug vivant connu, mais incohérence à corriger par cohérence/robustesse.
-- Le déplacement d'ennemi n'a pas encore été vérifié empiriquement pour la contrainte "ne doit pas pousser les joueurs" (deux `CharacterBody3D` ne se poussent pas par défaut, présumé bon mais jamais confirmé en test dédié).
-- Règles plus riches (seuils de PV, soin, retraite) : toujours pas commencées.
+- ~~`AttackNearestRule.matches()` ne protège pas contre un `get_nearest_opponent()` renvoyant `null`~~ **Nettoyé** (session ci-dessous) — garde `if not target: return false` ajoutée, cohérente avec `ChaseNearestRule`.
+- ~~Le déplacement d'ennemi n'a pas encore été vérifié empiriquement pour la contrainte "ne doit pas pousser les joueurs"~~ **Vérifié** (session ci-dessous) — l'ennemi s'arrête bien pile à portée, confirmé par Julien.
+- Règles plus riches (soin) : toujours pas commencées. Seuil de PV fait pour la fuite (voir ci-dessous).
+
+## Session — `FleeRule` (seuil de PV) + agro de groupe entre ennemis (`pack_radius`), 2ᵉ archétype ✅
+
+**Objectif de session** : coder en autonomie un nouvel archétype ("hit and run" : chasse, attaque, puis fuit) et tester avec plusieurs ennemis sur la carte. Julien a codé `FleeRule` et l'agro de groupe seul, la session a servi de revue de code à chaque étape — plusieurs itérations, deux bugs bloquants trouvés et corrigés.
+
+**`FleeRule` (`resources/rules/flee_rule.gd`, nouveau)** :
+- `matches()` : `if value and enemy.current_hp > value: return false` — fuite déclenchée sous un seuil de PV réglé via `RuleEntry.value` (même mécanisme que les autres règles). Particularité actée : `value = 0.0` (défaut si non réglé dans l'inspecteur) rend la condition toujours vraie (`if value` faux → pas de check) — la règle matche alors inconditionnellement. Pas corrigé, gardé tel quel car ça s'est avéré utile pour l'archétype "hit and run" (voir plus bas).
+- **Bug trouvé en revue, corrigé** : première version de `decide()` renvoyait une destination à distance fixe d'1m (`to_target.normalized()`). Corrigé en un vecteur non normalisé (`enemy.global_position + to_target`, où `to_target` pointe déjà à l'opposé de la cible) — la distance demandée suit alors l'écart actuel à l'adversaire. Limite identifiée et actée comme acceptable pour l'instant : si l'ennemi est collé à sa cible (cas fréquent pour une fuite déclenchée par PV bas en mêlée), `to_target` est quasi nul, et `Vector3.limit_length()` dans `_resolve_action` ne peut qu'ajourter un vecteur trop long — jamais agrandir un vecteur trop court. Donc une fuite déclenchée à bout portant ne parcourt qu'une distance minime malgré un `move_radius` disponible plus grand. Pas encore retravaillé (piste notée : normaliser puis multiplier par `enemy.move_radius`, sur le modèle de `ChaseNearestRule`).
+
+**Agro de groupe (`resources/combat.gd::add_combatant`)** — choix discuté en session : Julien a choisi l'option "propagation en chaîne" (un ennemi tiré dans le combat entraîne à son tour ses propres voisins) plutôt qu'un seul saut, pour un vrai effet de meute. Détection par simple boucle de distance sur le conteneur `Enemies` (pas de requête physique/`Area3D` dédiée) — jugé suffisant pour l'instant, ce check ne tournant qu'au moment de l'ajout au combat, pas par frame ; à revoir seulement si un besoin de perf concret apparaît (même logique que la décision AoE de `CombatAction`, session précédente).
+
+```gdscript
+func add_combatant(combatant: Combatant):
+	if combatant.current_combat_id != -1:
+		return
+	turn_order.append(combatant)
+	if combatant is Enemy:
+		combatant.current_combat_id = self.combat_id
+		for other_enemy: Enemy in combatant.get_parent().get_children():
+			if other_enemy.current_combat_id != -1:
+				continue
+			if (
+				combatant.global_position.distance_to(other_enemy.global_position)
+				<= combatant.definition.pack_radius
+			):
+				add_combatant(other_enemy)
+	combatant.died.connect(_check_combat_end)
+```
+- Garde anti-récursion infinie : `current_combat_id` est posé sur `combatant` **avant** de scanner ses voisins, donc un ennemi déjà traité ne se re-déclenche jamais (ni lui-même, ni via un voisin qui le re-détecterait dans l'autre sens) — vérifié en discussion avant écriture, pas de piège rencontré en test.
+- Nouveau champ `pack_radius` sur `EnemyDefinition` (même style que `attack_range`/`detection_radius`). Rayon asymétrique assumé : c'est le `pack_radius` de l'ennemi qui *détecte* qui s'applique, pas celui du voisin détecté — à garder en tête si des archétypes aux rayons très différents se croisent un jour.
+- **Bug trouvé en revue, corrigé** : première version itérait `for other_enemy: Enemy in combatant.get_parent():` — un `Node` Godot n'est pas itérable directement dans un `for` (contrairement à `Array`/`Dictionary`), seul `get_children()` l'est. Corrigé en `combatant.get_parent().get_children()`.
+
+**Deuxième archétype créé — `resources/enemies/hit_and_run_enemy.tres`** : `rules = [ChaseNearestRule, AttackNearestRule, FleeRule]`, `pack_radius = 10.0`, `detection_radius = 3.0`. `FleeRule` sans `value` réglée (donc 0.0, toujours vraie) : combiné à l'ordre des règles et à la boucle multi-actions de `_handle_enemy_turn` (chase → attack → NONE ou reliquat), ça donne naturellement un "attaque puis tente de fuir" en fin de tour — comportement qui colle au nom de l'archétype, pas creusé plus mais à surveiller si un seuil de PV explicite devient nécessaire pour ce cas précis.
+
+`levels/game.tscn` : ancien `test_enemy.tres` renommé/déplacé vers `resources/enemies/chase_enemy.tres` (dossier dédié aux définitions d'ennemis, plus adapté maintenant qu'il y en a plusieurs), un second ennemi (`hit_and_run_enemy.tres`) ajouté dans `Enemies`.
+
+**Petite incohérence relevée en revue, non bloquante** : `ChaseNearestRule.decide()` a aussi reçu un `if not target: return` — en pratique mort/inatteignable, puisque `matches()` filtre déjà ce cas avant que `decide()` ne soit appelée. `return` sans valeur dans une fonction typée `-> CombatAction` est en plus syntaxiquement bancal (retourne implicitement `null`). Sans conséquence tant que `matches()` protège l'appel, mais à nettoyer si l'occasion se présente.
+
+**Testé en réseau réel avec 2 ennemis (archétypes différents), confirmé par Julien ✅** : agro de groupe fonctionnel (chaîne validée), fuite fonctionnelle.
+
+**Pas fait / prochaine session :**
+- Fuite à bout portant qui ne parcourt qu'une distance minime (voir bug `FleeRule.decide()` ci-dessus, identifié mais pas corrigé).
+- `pack_radius` non testé avec des archétypes aux rayons très différents (asymétrie de détection).
+- `return` sans valeur dans `ChaseNearestRule.decide()` — nettoyage mineur, mort en pratique.
+- Règles de soin : toujours pas commencées.
 
 ## Prochaines étapes
 

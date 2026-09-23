@@ -14,6 +14,8 @@ func matches(enemy: Enemy, combat: Combat, _value: float) -> bool:
 
 func decide(enemy: Enemy, combat: Combat, _value: float) -> CombatAction:
 	var target := combat.get_nearest_opponent(enemy)
+	if not target:
+		return
 	var to_target := target.global_position - enemy.global_position
 	to_target.y = 0.0
 	var stop_distance := maxf(enemy.attack_range * RANGE_MARGIN, 0.0)

@@ -5,6 +5,7 @@ class_name EnemyDefinition
 @export var attack_range: float
 @export var detection_radius: float
 @export var attack_damage: int
+@export var pack_radius: float
 @export var rules: Array[RuleEntry] = []
 
 func decide_action(enemy: Enemy, combat: Combat) -> CombatAction:

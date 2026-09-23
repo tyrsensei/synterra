@@ -1,0 +1,33 @@
+[gd_resource type="Resource" script_class="EnemyDefinition" format=3 uid="uid://bgv0s41g3k64f"]
+
+[ext_resource type="Script" uid="uid://dgi2t0fmouiyi" path="res://resources/rules/rule_entry.gd" id="1_4x32s"]
+[ext_resource type="Script" uid="uid://dljba7gthlkmh" path="res://resources/rules/chase_nearest_rule.gd" id="2_ilvem"]
+[ext_resource type="Script" uid="uid://cxdtw7eb07o0f" path="res://resources/rules/attack_nearest_rule.gd" id="3_15m0t"]
+[ext_resource type="Script" uid="uid://lwdnevrw52jg" path="res://resources/enemy_definition.gd" id="4_bl8bd"]
+
+[sub_resource type="Resource" id="Resource_30w35"]
+script = ExtResource("2_ilvem")
+metadata/_custom_type_script = "uid://dljba7gthlkmh"
+
+[sub_resource type="Resource" id="Resource_vhr6a"]
+script = ExtResource("1_4x32s")
+rule = SubResource("Resource_30w35")
+metadata/_custom_type_script = "uid://dgi2t0fmouiyi"
+
+[sub_resource type="Resource" id="Resource_hr7in"]
+script = ExtResource("3_15m0t")
+metadata/_custom_type_script = "uid://cxdtw7eb07o0f"
+
+[sub_resource type="Resource" id="Resource_7bqcc"]
+script = ExtResource("1_4x32s")
+rule = SubResource("Resource_hr7in")
+metadata/_custom_type_script = "uid://dgi2t0fmouiyi"
+
+[resource]
+script = ExtResource("4_bl8bd")
+attack_range = 5.0
+detection_radius = 1.5
+attack_damage = 2
+pack_radius = 10.0
+rules = Array[ExtResource("1_4x32s")]([SubResource("Resource_vhr6a"), SubResource("Resource_7bqcc")])
+metadata/_custom_type_script = "uid://lwdnevrw52jg"

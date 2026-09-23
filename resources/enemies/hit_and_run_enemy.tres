@@ -1,0 +1,43 @@
+[gd_resource type="Resource" script_class="EnemyDefinition" format=3 uid="uid://of5ypdr66wcl"]
+
+[ext_resource type="Script" uid="uid://dgi2t0fmouiyi" path="res://resources/rules/rule_entry.gd" id="1_8btte"]
+[ext_resource type="Script" uid="uid://lwdnevrw52jg" path="res://resources/enemy_definition.gd" id="2_8dp3s"]
+[ext_resource type="Script" uid="uid://dljba7gthlkmh" path="res://resources/rules/chase_nearest_rule.gd" id="2_c7sru"]
+[ext_resource type="Script" uid="uid://cxdtw7eb07o0f" path="res://resources/rules/attack_nearest_rule.gd" id="3_qepg0"]
+[ext_resource type="Script" uid="uid://vve384h4hj6y" path="res://resources/rules/flee_rule.gd" id="4_jekgr"]
+
+[sub_resource type="Resource" id="Resource_c7sru"]
+script = ExtResource("2_c7sru")
+metadata/_custom_type_script = "uid://dljba7gthlkmh"
+
+[sub_resource type="Resource" id="Resource_dguhc"]
+script = ExtResource("1_8btte")
+rule = SubResource("Resource_c7sru")
+metadata/_custom_type_script = "uid://dgi2t0fmouiyi"
+
+[sub_resource type="Resource" id="Resource_jekgr"]
+script = ExtResource("3_qepg0")
+metadata/_custom_type_script = "uid://cxdtw7eb07o0f"
+
+[sub_resource type="Resource" id="Resource_qepg0"]
+script = ExtResource("1_8btte")
+rule = SubResource("Resource_jekgr")
+metadata/_custom_type_script = "uid://dgi2t0fmouiyi"
+
+[sub_resource type="Resource" id="Resource_ienkg"]
+script = ExtResource("4_jekgr")
+metadata/_custom_type_script = "uid://vve384h4hj6y"
+
+[sub_resource type="Resource" id="Resource_4tttr"]
+script = ExtResource("1_8btte")
+rule = SubResource("Resource_ienkg")
+metadata/_custom_type_script = "uid://dgi2t0fmouiyi"
+
+[resource]
+script = ExtResource("2_8dp3s")
+attack_range = 5.0
+detection_radius = 3.0
+attack_damage = 2
+pack_radius = 10.0
+rules = Array[ExtResource("1_8btte")]([SubResource("Resource_dguhc"), SubResource("Resource_qepg0"), SubResource("Resource_4tttr")])
+metadata/_custom_type_script = "uid://lwdnevrw52jg"

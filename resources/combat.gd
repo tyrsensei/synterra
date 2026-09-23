@@ -23,10 +23,22 @@ func is_everyone_ready():
 	return true
 
 func add_combatant(combatant: Combatant):
+	if combatant.current_combat_id != -1:
+		return
 	turn_order.append(combatant)
-	if combatant is not Player:
+	if combatant is Enemy:
 		combatant.current_combat_id = self.combat_id
+		# Find other enemies from pack
+		for other_enemy:Enemy in combatant.get_parent().get_children():
+			if other_enemy.current_combat_id != -1:
+				continue
+			if (
+				combatant.global_position.distance_to(other_enemy.global_position)
+				<= combatant.definition.pack_radius
+			):
+				add_combatant(other_enemy)
 	combatant.died.connect(_check_combat_end)
+	
 
 func start():
 	turn_order.sort_custom(
