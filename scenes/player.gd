@@ -2,7 +2,6 @@ extends Combatant
 
 class_name Player
 
-@export var speed:= 5
 @export var camera_speed:= 0.005
 @export var camera_pivot_min = -PI/4
 @export var camera_pivot_max = PI/4
@@ -55,7 +54,7 @@ func _physics_process(delta: float) -> void:
 	if not CombatManager.can_move(self):
 		return
 	
-	var direction_input:= Input.get_vector("move_left", "move_right", "move_down", "move_up") * speed
+	var direction_input:= Input.get_vector("move_left", "move_right", "move_down", "move_up") * move_speed
 	var move_direction:Vector3 = (
 		direction_input.x * self.transform.basis.x
 	) + (

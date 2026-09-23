@@ -4,6 +4,7 @@ class_name Combatant
 
 var initiative: int = 0
 var current_combat_id: int = -1
+@export var move_speed:= 5.0
 var move_center: Vector3
 var move_radius: float
 var move_max_distance: float = 5.0

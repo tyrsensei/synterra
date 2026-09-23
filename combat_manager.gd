@@ -83,8 +83,12 @@ func _start_turn_timer(combat: Combat):
 
 func _handle_enemy_turn(combat: Combat, enemy: Enemy):
 	await get_tree().create_timer(1.0).timeout
-	var action := enemy.definition.decide_action(enemy, combat)
-	_resolve_action(action)
+	var action: CombatAction = null
+	var nb_resolved := 0
+	while (not action or action.kind != CombatAction.Kind.NONE) and nb_resolved <= 3:
+		nb_resolved += 1
+		action = enemy.definition.decide_action(enemy, combat)
+		await _resolve_action(action)
 	combat.next_turn()
 
 @rpc("authority", "call_local")
@@ -186,9 +190,8 @@ func _handle_combat_action(combat: Combat, remote_id: int, action: Action):
 			if enemies.size() == 0:
 				rpc_id(remote_id, "notify_action_rejected")
 				return
-			var attack_action := CombatAction.attack(enemies[0], 5)
+			var attack_action := CombatAction.attack(combatant, enemies[0], 5)
 			_resolve_action(attack_action)
-			combatant.action_used = true
 
 func get_combat(combat_id: int) -> Combat:
 	return currents[combat_id]
@@ -244,7 +247,20 @@ func get_states(client_id: int):
 
 func _resolve_action(action: CombatAction) -> void:
 	match action.kind:
+		CombatAction.Kind.MOVE:
+			if action.actor is not Enemy:
+				return
+			var mover := action.actor
+			var offset: Vector3 = action.destination - mover.move_center
+			offset.y = 0.0
+			var final_pos: Vector3 = mover.move_center + offset.limit_length(mover.move_radius)
+			mover.move_to(final_pos)
+			await mover.move_finished
+			mover.set_available_move()
+			if mover.move_radius < 0.05:
+				mover.move_radius = 0.0
 		CombatAction.Kind.ATTACK:
+			action.actor.action_used = true
 			action.target.change_hp(-action.hp_amount)
 			rpc(
 				"notify_health_changed",
