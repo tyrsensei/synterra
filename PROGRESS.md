@@ -1842,10 +1842,10 @@ func add_combatant(combatant: Combatant):
 **Testé en réseau réel avec 2 ennemis (archétypes différents), confirmé par Julien ✅** : agro de groupe fonctionnel (chaîne validée), fuite fonctionnelle.
 
 **Pas fait / prochaine session :**
-- Fuite à bout portant qui ne parcourt qu'une distance minime (voir bug `FleeRule.decide()` ci-dessus, identifié mais pas corrigé).
+- ~~Fuite à bout portant qui ne parcourt qu'une distance minime~~ **Corrigé et confirmé par Julien** — `FleeRule.decide()` calcule désormais `to_target.normalized() * enemy.move_radius` (fuite jusqu'à la limite du budget disponible, quelle que soit la distance de départ à la cible).
 - `pack_radius` non testé avec des archétypes aux rayons très différents (asymétrie de détection).
-- `return` sans valeur dans `ChaseNearestRule.decide()` — nettoyage mineur, mort en pratique.
-- Règles de soin : toujours pas commencées.
+- `return` sans valeur dans `ChaseNearestRule.decide()` et `FleeRule.decide()` (ajouté en cohérence par Julien) — nettoyage mineur, mort en pratique dans les deux cas puisque `matches()` filtre déjà l'absence d'adversaire avant l'appel.
+- **Soins : hors scope pour l'instant** — appartiennent au futur système d'aptitudes, lui-même fortement couplé à la synthèse élémentaire/l'équipement (voir `GAMEPLAY.md` § Système élémentaire / Progression). À reprendre lors d'une session de design dédiée à ce système, pas comme une simple règle de combat de plus.
 
 ## Prochaines étapes
 
